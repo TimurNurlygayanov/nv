@@ -24,6 +24,8 @@ DEFAULTS = {
     "max_tool_output": 4000,     # chars of tool output kept in history
     "command_timeout": 120,      # seconds for run_command
     "history_char_budget": 45000,  # ~ chars before history compaction kicks in
+    "confirm_over_seconds": 60,  # ask before jobs estimated longer than this
+    "shell": "",                 # shell for !commands: powershell/cmd/bash ('' = auto)
 }
 
 
@@ -41,6 +43,8 @@ class Config:
     max_tool_output: int = DEFAULTS["max_tool_output"]
     command_timeout: int = DEFAULTS["command_timeout"]
     history_char_budget: int = DEFAULTS["history_char_budget"]
+    confirm_over_seconds: int = DEFAULTS["confirm_over_seconds"]
+    shell: str = DEFAULTS["shell"]
     root: Path = field(default_factory=Path.cwd)
 
     @property

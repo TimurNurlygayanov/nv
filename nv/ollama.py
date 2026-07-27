@@ -14,6 +14,8 @@ import urllib.error
 import urllib.request
 from typing import Callable, Optional
 
+from nv import perf
+
 
 class OllamaError(Exception):
     pass
@@ -86,6 +88,10 @@ class OllamaClient:
                 for tc in msg.get("tool_calls") or []:
                     tool_calls.append(tc)
                 if chunk.get("done"):
+                    try:
+                        perf.record(self.host, self.model, chunk)
+                    except Exception:
+                        pass
                     break
 
         content = "".join(content_parts)

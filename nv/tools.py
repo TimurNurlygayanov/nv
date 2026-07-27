@@ -12,7 +12,7 @@ from pathlib import Path
 
 from nv.config import Config
 from nv.sandbox import Sandbox, SandboxError
-from nv import ui
+from nv import checkpoint, session, ui
 
 SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv",
              ".idea", ".vscode", "dist", "build", ".mypy_cache",
@@ -180,6 +180,51 @@ class Toolbox:
             parts.append(f"stderr:\n{stderr}")
         return "\n".join(parts)
 
+    def analyze_files(self, path: str, goal: str) -> str:
+        """Deep analysis of big files/folders via the ingest pipeline.
+        The pipeline itself asks the user to confirm file selection and
+        long jobs, so no extra gate is needed here."""
+        try:
+            p = self.sandbox.resolve(path or ".")
+        except SandboxError as e:
+            return f"ERROR: {e}"
+        from nv import ingest  # local import: ingest imports tools' constants
+        from nv.ollama import OllamaError
+        try:
+            res = ingest.interactive_pipeline(self.cfg, p, goal)
+        except OllamaError as e:
+            return f"ERROR: {e}"
+        if res is None:
+            return ("cancelled: the user declined the analysis or nothing "
+                    "was found. Do not retry; ask the user how to proceed.")
+        text, summarized, source = res
+        kind = "digest" if summarized else "content"
+        return f"[{source} — {kind}]\n{text}"
+
+    def undo_changes(self) -> str:
+        cp = checkpoint.load_last(self.cfg.root)
+        if not cp:
+            return "no checkpoint found — nothing to undo"
+        stat = checkpoint.diff_stat(self.cfg.root, cp)
+        if not stat:
+            return "nothing to undo — working tree matches the checkpoint"
+        ui.banner(f"{self.agent_name} wants to revert to the last checkpoint")
+        ui.out(stat)
+        ok, feedback = ui.CONFIRM.ask("revert the working tree?", self.agent_name)
+        if not ok:
+            return f"REJECTED by user. {('User says: ' + feedback) if feedback else ''}"
+        return checkpoint.restore(self.cfg.root, cp)
+
+    def save_note(self, text: str) -> str:
+        """Append a durable fact to .nv/notes.md (announced, not confirmed —
+        it never touches project code)."""
+        text = text.strip()
+        if not text:
+            return "ERROR: empty note"
+        session.add_note(self.cfg.root, text)
+        ui.out(f"[{self.agent_name}] noted: {text[:140]}", ui.CYAN)
+        return "note saved to project notes"
+
     # ---- dispatch ----------------------------------------------------
 
     def call(self, name: str, args: dict) -> str:
@@ -205,6 +250,13 @@ class Toolbox:
                                       str(args.get("new_text", "")))
             if name == "run_command":
                 return self.run_command(str(args.get("command", "")))
+            if name == "save_note":
+                return self.save_note(str(args.get("text", "")))
+            if name == "analyze_files":
+                return self.analyze_files(str(args.get("path", ".")),
+                                          str(args.get("goal", "")))
+            if name == "undo_changes":
+                return self.undo_changes()
             return f"ERROR: unknown tool '{name}'"
         except SandboxError as e:
             return f"ERROR: {e}"
@@ -273,6 +325,37 @@ def tool_schemas(names: list[str]) -> list[dict]:
                 "command": {"type": "string"}},
                 "required": ["command"]},
         },
+        "analyze_files": {
+            "description": "Deep-analyze a big file or a whole folder (docs, "
+                           "logs, specs) that is too large to read directly. "
+                           "Relevant files are auto-selected and content is "
+                           "distilled chunk by chunk into a digest focused on "
+                           "the goal. Use for tasks like 'generate user "
+                           "stories from the docs' or 'why does this huge CI "
+                           "log fail'. Long jobs are estimated and confirmed "
+                           "by the user.",
+            "parameters": {"type": "object", "properties": {
+                "path": {"type": "string",
+                         "description": "file or folder, e.g. 'docs' or 'ci.log'"},
+                "goal": {"type": "string",
+                         "description": "what to look for / what the digest is for"}},
+                "required": ["path", "goal"]},
+        },
+        "undo_changes": {
+            "description": "Revert the working tree to the checkpoint taken "
+                           "before the current task. Call when the user asks "
+                           "to undo/revert/rollback the changes. User must "
+                           "approve.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+        "save_note": {
+            "description": "Save ONE short durable fact about the project to "
+                           "the shared notes (env var meaning, gotcha, flaky "
+                           "test, non-obvious behavior). Not for task progress.",
+            "parameters": {"type": "object", "properties": {
+                "text": {"type": "string", "description": "one sentence"}},
+                "required": ["text"]},
+        },
     }
     return [{"type": "function",
              "function": {"name": n, **all_schemas[n]}}
@@ -280,5 +363,6 @@ def tool_schemas(names: list[str]) -> list[dict]:
 
 
 CODER_TOOLS = ["list_files", "read_file", "search", "git_diff",
-               "write_file", "edit_file", "run_command"]
+               "write_file", "edit_file", "run_command", "save_note",
+               "analyze_files", "undo_changes"]
 READONLY_TOOLS = ["list_files", "read_file", "search", "git_diff"]

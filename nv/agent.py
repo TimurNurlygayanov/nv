@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 
-from nv import ui
+from nv import session, ui
 from nv.config import Config
 from nv.ollama import OllamaClient, OllamaError, strip_thinking
 from nv.prompts import AGENT_CONFIGS, build_system_prompt
@@ -31,7 +31,8 @@ class Agent:
         self.toolbox = Toolbox(cfg, agent_name=self.name)
         self.schemas = tool_schemas(spec["tools"])
         listing = self.toolbox.list_files(".", max_entries=40)
-        self.system = build_system_prompt(kind, agents_md, listing)
+        notes = session.load_notes(cfg.root)
+        self.system = build_system_prompt(kind, agents_md, listing, notes)
         self.messages: list[dict] = [{"role": "system", "content": self.system}]
 
     def reset(self) -> None:
@@ -115,6 +116,8 @@ class Agent:
                     preview = result if len(result) <= 400 else result[:400] + "…"
                     ui.info(preview)
                 cap = self.cfg.max_tool_output
+                if tname == "analyze_files":  # digests are the whole point
+                    cap = max(cap, 12000)
                 if len(result) > cap:
                     result = result[:cap] + "\n[...output truncated...]"
                 self.messages.append({"role": "tool", "content": result,

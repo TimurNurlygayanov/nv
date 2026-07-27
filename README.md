@@ -51,12 +51,22 @@ nv --host http://192.168.1.50:11434 --model qwen3-coder:30b
 Start `nv` in the project folder you want the agent to work on. That folder
 becomes the sandbox — the agent cannot see anything outside it.
 
+Everything works in **plain natural language** — the agent has tools for
+reading, editing, running commands, analyzing big docs/logs, and undoing
+its own changes, and picks them itself:
+
 ```
 nv> fix the failing test in tests/test_api.py
-nv> /diff                     # see what the agent changed, colored
-nv> /team 3 add type hints to all modules   # 3 parallel agents + reviewer
-nv> /review                   # separate reviewer agent checks the git diff
+nv> read the docs folder and generate user stories for the refunds feature
+nv> here is why I think payment fails — check service.py and prove me wrong
+nv> undo everything you just did
+nv> what changed so far?
 ```
+
+Slash commands exist as optional instant shortcuts (no model round-trip):
+`/diff` shows the git diff immediately, `/undo` reverts without asking the
+model, `/team 3 <task>` runs parallel agents, `/ask` forces the read-only
+agent, `/load`, `/paste`, `/review`, `/resume`… — see `/help`.
 
 ### Pipeline
 
@@ -79,6 +89,12 @@ One-shot mode: `nv "add a --verbose flag to cli.py"` or `nv --team 3 "task"`.
 
 | command | action |
 |---|---|
+| `/ask <question>` | fast read-only Q&A: how the system works, env vars, why tests fail, kubectl/CI advice — no confirmations possible, cites file:line |
+| `/paste [question]` | paste a multi-line stack trace or log fragment (finish with `END`) and discuss it |
+| `/load <file-or-folder> [question]` | feed files to the agent: inventory → relevant-file selection (confirmed by you) → chunked map-reduce extraction, with an upfront time estimate |
+| `/undo` | revert the working tree to the checkpoint taken before the last task |
+| `/resume` | continue yesterday's conversation (history persists in `.nv/session.json`) |
+| `/note <fact>` | append a fact to project notes (`.nv/notes.md`); agents also save facts themselves and get all notes injected at start |
 | `/diff` / `/diff stat` | show git diff right in the chat |
 | `/plan on|off`, `/plan <task>` | control the planning step |
 | `/team N <task>` | planner splits the task, N agents work in parallel, a separate reviewer agent reviews the diff and can trigger a fixer |
@@ -88,6 +104,65 @@ One-shot mode: `nv "add a --verbose flag to cli.py"` or `nv --team 3 "task"`.
 | `/scan` | re-check `OLLAMA_HOST` / saved host / localhost for Ollama + models |
 | `/model`, `/host`, `/config` | settings |
 | `/new` | reset conversation history |
+
+## Terminal passthrough
+
+The chat console is also your terminal — no window switching:
+
+```
+nv> !git log --oneline -5          # runs right here
+nv> ls                             # bare commands are auto-detected too
+nv> env
+nv> !!replace foo with bar in every file under tests/
+  $ Get-ChildItem tests -Recurse -File | ForEach-Object { (Get-Content $_) -replace 'foo','bar' | Set-Content $_ }
+run it? [y/n or type a correction]
+```
+
+- `!<command>` runs immediately: no model call, no confirmation (you typed
+  it), output printed in place. Interactive programs (`vim`, `less`) attach
+  to the console.
+- The captured output is **remembered**: your next message to the model
+  automatically includes the recent commands + output as context, so
+  "почему такой вывод?" right after `env | grep VAR` just works.
+- `!!<description>` — the model turns words into one command, shows it, and
+  you approve (`y`), reject (`n`), or type a correction and it retries.
+- If any command exits non-zero, nv offers to let the model fix it using
+  the error output.
+- Commands run in your configured `shell` (default: PowerShell on Windows);
+  cwd is the project root. These are *your* commands — the agent sandbox
+  denylist does not apply to them.
+
+## Daily QA workflows
+
+- **Why is CI red?** — `/load ci_run.log why did the e2e stage fail` — the log
+  is chunked and distilled by the local model (any size, it just takes time),
+  and the agent explains the failures from the digest.
+- **User stories from 20k lines of docs** — `/load docs/ generate user
+  stories for <feature>`: nv first builds a cheap inventory of all files
+  (headings + previews, no LLM), one quick model call selects only the
+  relevant files (you confirm the list, or correct it with feedback), and
+  only those are chunk-parsed with a relevance-driven extraction prompt —
+  nothing is dropped from the middle of documents.
+- **Job estimates** — before any chunked job starts, nv projects its duration
+  from measured model speeds (every Ollama reply updates a rolling
+  tokens/sec average in `~/.nv-perf.json` — it self-calibrates). Quick jobs
+  just run; anything over `confirm_over_seconds` (default 60) asks first:
+  "this is a LONG job: estimated ~1.3 h — start it?". If the model was never
+  measured, the first chunk is timed and then you decide. Progress lines
+  show elapsed time and ETA; Ctrl+C aborts cleanly.
+- **Debugging** — `/paste`, paste the stack trace, finish with `END`; the
+  agent reads the involved files and explains the cause.
+- **"How does this work?"** — `/ask which env variables does the payment
+  service read` — read-only agent, instant, cites file:line, suggests exact
+  commands (kubectl, env setup) for you to run manually.
+- **Fearless changes** — a git checkpoint is taken before every task;
+  `/undo` reverts everything the agents did, `/diff` shows it first.
+- **Knowledge accumulates** — facts saved via `/note` (or by agents through
+  their `save_note` tool) land in `.nv/notes.md` and are injected into every
+  agent's system prompt, so the model "remembers" your system across sessions.
+- **Long investigations** — chat history is saved automatically; next day
+  `/resume` continues where you stopped. Ctrl+C aborts a running task
+  without killing the console.
 
 ## Confirmations
 
@@ -131,4 +206,4 @@ Built-in agent configs are tuned for small/local models:
 `~/.nv.json` (global) or `.nv.json` in the project (overrides). Keys:
 `host`, `model`, `review_model`, `num_ctx`, `temperature`, `max_steps`, `plan_first`,
 `max_read_lines`, `max_search_hits`, `max_tool_output`, `command_timeout`,
-`history_char_budget`.
+`history_char_budget`, `confirm_over_seconds`, `shell`.
