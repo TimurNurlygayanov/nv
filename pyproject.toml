@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nv"
+version = "0.1.0"
+description = "nv - local LLM agent console for Ollama (optimized for qwen and other local models)"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+nv = "nv.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["nv*"]
