@@ -27,15 +27,26 @@ class Agent:
             model=model or cfg.model,
             num_ctx=cfg.num_ctx,
             temperature=spec.get("temperature", cfg.temperature),
+            num_predict=cfg.max_answer_tokens,
         )
         self.toolbox = Toolbox(cfg, agent_name=self.name)
         self.schemas = tool_schemas(spec["tools"])
-        listing = self.toolbox.list_files(".", max_entries=40)
-        notes = session.load_notes(cfg.root)
-        self.system = build_system_prompt(kind, agents_md, listing, notes)
+        self._agents_md = agents_md
+        self._listing = self.toolbox.list_files(".", max_entries=40)
+        self.system = ""
+        self._refresh_system()
         self.messages: list[dict] = [{"role": "system", "content": self.system}]
 
+    def _refresh_system(self) -> None:
+        """Rebuild the system prompt so notes and personality changes made
+        mid-session take effect on the next run."""
+        self.system = build_system_prompt(
+            self.kind, self._agents_md, self._listing,
+            session.load_notes(self.cfg.root),
+            personality=self.cfg.personality)
+
     def reset(self) -> None:
+        self._refresh_system()
         self.messages = [{"role": "system", "content": self.system}]
 
     # ---- context compaction -----------------------------------------
@@ -68,6 +79,8 @@ class Agent:
     # ---- main loop ---------------------------------------------------
 
     def run(self, task: str) -> str:
+        self._refresh_system()
+        self.messages[0] = {"role": "system", "content": self.system}
         self.messages.append({"role": "user", "content": task})
         final = ""
         for step in range(1, self.cfg.max_steps + 1):
@@ -110,7 +123,7 @@ class Agent:
                     brief = {k: (v[:80] + "…" if isinstance(v, str) and len(v) > 80 else v)
                              for k, v in targs.items()}
                     ui.out(f"\n[{self.name}] step {step}: {tname}({json.dumps(brief, ensure_ascii=False)})",
-                           ui.MAGENTA)
+                           ui.c("tool"))
                 result = self.toolbox.call(tname, targs)
                 if not self.quiet:
                     preview = result if len(result) <= 400 else result[:400] + "…"

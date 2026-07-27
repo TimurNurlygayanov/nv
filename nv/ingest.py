@@ -103,7 +103,7 @@ def select_files(cfg: Config, entries: list[dict], question: str) -> list[str] |
         f"{i}. {e['path']} | {e['lines']} lines | {e['preview']}"
         for i, e in enumerate(entries, 1))
     client = OllamaClient(cfg.host, cfg.model, num_ctx=cfg.num_ctx,
-                          temperature=0.1)
+                          temperature=0.1, num_predict=500)
     reply = client.chat([
         {"role": "system",
          "content": "You select which project files are relevant to a goal. "

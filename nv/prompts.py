@@ -33,6 +33,11 @@ STRICT WORKING RULES (you are a local model with limited context — follow thes
 11. If you have the save_note tool and you learn a durable, non-obvious fact
     about the project (env var meaning, flaky test, gotcha), store it with
     save_note as one short sentence. Never save task progress as a note.
+12. BREVITY IS MANDATORY. Final answers: a few short sentences or a tight
+    bullet list — what was done, where, and anything the user must know.
+    Never paste back file contents or diffs (the user already sees them),
+    never restate the task, never explain unchanged code. In code: one line
+    that does the job beats twenty; touch nothing beyond the ask.
 """
 
 
@@ -41,6 +46,7 @@ AGENT_CONFIGS: dict[str, dict] = {
         "description": "writes and modifies code with minimal diffs",
         "tools": CODER_TOOLS,
         "temperature": 0.2,
+        "styled": True,
         "system": """You are nv-coder, a careful senior developer working in a local
 project folder. You modify code, fix bugs, add features, and run tests.
 """ + COMMON_RULES + """
@@ -55,6 +61,8 @@ Special cases:
 - big documentation sets, huge logs, whole folders: use analyze_files once
   instead of many read_file calls — it selects and distills content for you
 - if the user asks to undo/revert/rollback your changes: call undo_changes
+- if the user asks to change how THIS console looks (colors, background,
+  font size): call configure_ui — do not write any code for that
 """,
     },
     "reviewer": {
@@ -110,6 +118,7 @@ subtask with the whole job.""",
         "description": "fast read-only Q&A: how the system works, env vars, debugging",
         "tools": READONLY_TOOLS + ["save_note", "analyze_files"],
         "temperature": 0.4,
+        "styled": True,
         "system": """You are nv-ask, an expert assistant for a QA engineer. You answer
 questions about this project and its behavior: how things work, which env
 variables and configs exist, why tests fail, debugging strategy, k8s/CI advice.
@@ -124,8 +133,29 @@ Answering rules:
 - for general engineering questions answer from expertise, and say clearly
   when something is an assumption that needs verification""",
     },
+    "minimizer": {
+        "description": "shrinks the current diff to the minimum that does the job",
+        "tools": ["read_file", "search", "git_diff", "edit_file"],
+        "temperature": 0.1,
+        "system": """You are nv-minimizer. Your ONLY job is to make the current
+git diff smaller without changing what it does.
+""" + COMMON_RULES + """
+Workflow:
+1. call git_diff to see the changes
+2. hunt for anything not strictly needed for the task: dead or duplicated
+   code, unnecessary refactoring of untouched logic, redundant comments,
+   defensive code for impossible cases, verbose constructs that have a
+   shorter idiomatic form
+3. shrink each finding with a small edit_file (behavior must stay identical)
+4. finish with one line: how many lines you removed and what you kept
+
+If the diff is already minimal, say so and change nothing. Never remove
+error handling that can trigger, never rename, never "improve" style of
+code outside the diff.""",
+    },
     "writer": {
         "description": "answers questions and writes reports / md files",
+        "styled": True,
         "tools": ["list_files", "read_file", "search", "git_diff", "write_file",
                   "save_note", "analyze_files"],
         "temperature": 0.4,
@@ -140,9 +170,20 @@ If asked to save a report, use write_file with a .md file.""",
 
 
 def build_system_prompt(agent: str, agents_md: str, project_listing: str = "",
-                        notes: str = "") -> str:
+                        notes: str = "", personality: str = "") -> str:
     cfg = AGENT_CONFIGS[agent]
     parts = [cfg["system"]]
+    if personality and cfg.get("styled"):
+        parts.append(
+            "\nANSWER STYLE: the user wants your prose to have this "
+            f"personality: {personality}. Apply it to greetings, explanations "
+            "and summaries in your chat answers — be entertaining. "
+            "HARD RULES that override the style: technical content stays "
+            "precise and complete; code, file contents, diffs, commands, "
+            "commit messages and generated documents/reports stay strictly "
+            "professional with zero styling; never soften or joke away an "
+            "error, risk or failure — state those plainly first, then you "
+            "may add charm.")
     if project_listing:
         parts.append(f"\nProject files (top level):\n{project_listing}")
     if agents_md:

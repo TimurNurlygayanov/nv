@@ -23,12 +23,20 @@ class OllamaError(Exception):
 
 class OllamaClient:
     def __init__(self, host: str, model: str, num_ctx: int = 16384,
-                 temperature: float = 0.2, timeout: int = 600) -> None:
+                 temperature: float = 0.2, timeout: int = 600,
+                 num_predict: int = 0) -> None:
         self.host = host.rstrip("/")
         self.model = model
         self.num_ctx = num_ctx
         self.temperature = temperature
         self.timeout = timeout
+        self.num_predict = num_predict
+
+    def _options(self) -> dict:
+        options = {"num_ctx": self.num_ctx, "temperature": self.temperature}
+        if self.num_predict:
+            options["num_predict"] = self.num_predict
+        return options
 
     def _post(self, path: str, body: dict):
         req = urllib.request.Request(
@@ -60,7 +68,7 @@ class OllamaClient:
             "model": self.model,
             "messages": messages,
             "stream": True,
-            "options": {"num_ctx": self.num_ctx, "temperature": self.temperature},
+            "options": self._options(),
         }
         if tools:
             body["tools"] = tools

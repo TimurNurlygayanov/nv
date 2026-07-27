@@ -5,7 +5,8 @@ import argparse
 import sys
 from pathlib import Path
 
-from nv import __version__, checkpoint, discover, ingest, session, terminal, ui
+from nv import (__version__, checkpoint, discover, ingest, session, terminal,
+                theme, ui)
 from nv.agent import Agent
 from nv.config import Config, load_agents_md, load_config, save_global
 from nv.ollama import OllamaClient, OllamaError
@@ -28,8 +29,14 @@ commands:
   /diff            show current git diff (colored)
   /diff stat       show git diff --stat summary
   /undo            revert the working tree to before the last task
+  /minimize        run the minimizer agent: shrink the current diff without
+                   changing behavior (auto-offered after oversized tasks)
   /resume          continue the conversation from the previous session
   /note <fact>     save a fact to project notes; /note alone shows them
+  /theme <words>   restyle the console ("green text on black, bigger font");
+                   /theme shows the current theme, /theme reset restores it
+  /style <words>   answer personality, e.g. /style playful and lightly flirty
+                   /style shows the current one, /style off = neutral
   /plan on|off     toggle the planning step before coding (default: on)
   /plan <task>     force plan -> approve -> execute for this task
   /team N <task>   run N agents in parallel on the task + separate review
@@ -54,6 +61,9 @@ def _print_config(cfg: Config) -> None:
     ui.out(f"  model: {cfg.model}   reviewer model: {cfg.reviewer_model}")
     ui.out(f"  num_ctx: {cfg.num_ctx}   max_steps: {cfg.max_steps}   "
            f"plan_first: {'on' if cfg.plan_first else 'off'}")
+    ui.out(f"  max_answer_tokens: {cfg.max_answer_tokens}   "
+           f"max_diff_lines: {cfg.max_diff_lines}   "
+           f"style: {cfg.personality or 'neutral'}")
     ui.out(f"  root (sandbox): {cfg.root}")
 
 
@@ -179,18 +189,44 @@ def _read_multiline() -> str:
     return "\n".join(lines).strip()
 
 
+def run_minimizer(cfg: Config, agents_md: str, task: str = "") -> None:
+    minimizer = Agent(cfg, "minimizer", agents_md=agents_md)
+    try:
+        summary = minimizer.run(
+            "Minimize the current git diff: remove everything not strictly "
+            "needed, keep behavior identical."
+            + (f"\nThe diff came from this task: {task}" if task else "")
+            + "\nStart with the git_diff tool.")
+        ui.banner("minimizer")
+        ui.out(summary)
+    except KeyboardInterrupt:
+        ui.warn("\nminimizer interrupted")
+
+
 def _run_task(cfg: Config, agent: Agent, task: str, agents_md: str,
               planned: bool = True) -> None:
-    """One chat turn: checkpoint -> (plan ->) run -> persist history.
-    Ctrl+C aborts the turn, not the REPL."""
+    """One chat turn: checkpoint -> (plan ->) run -> minimize-offer ->
+    persist history. Ctrl+C aborts the turn, not the REPL."""
     ui.CONFIRM.reset()
-    if agent.kind in ("coder", "writer") and checkpoint.create(cfg.root):
-        ui.info("checkpoint saved (/undo reverts this task)")
+    cp = None
+    if agent.kind in ("coder", "writer"):
+        cp = checkpoint.create(cfg.root)
+        if cp:
+            ui.info("checkpoint saved (/undo reverts this task)")
     try:
         if planned and cfg.plan_first and agent.kind == "coder":
             run_planned(cfg, agent, task, agents_md)
         else:
             agent.run(task)
+        if cp:
+            grown = checkpoint.changed_lines_since(cfg.root, cp)
+            if grown > cfg.max_diff_lines:
+                ok, _ = ui.CONFIRM.ask(
+                    f"the task changed {grown} lines (limit "
+                    f"{cfg.max_diff_lines}) — run the minimizer agent to "
+                    "shrink the diff?", force=True)
+                if ok:
+                    run_minimizer(cfg, agents_md, task)
     except KeyboardInterrupt:
         ui.warn("\ninterrupted — back to the prompt (history kept, "
                 "/undo reverts applied changes)")
@@ -226,6 +262,8 @@ def _input_task(text: str, source: str, question: str, summarized: bool) -> str:
 
 def repl(cfg: Config) -> None:
     agents_md = load_agents_md(cfg.root)
+    if cfg.theme:
+        theme.apply(cfg.theme, quiet=True)
     ui.out(f"{ui.BOLD}{ui.CYAN}nv v{__version__}{ui.RESET} — local LLM agent console")
     ui.info(f"sandbox: {cfg.root}")
     if agents_md:
@@ -262,7 +300,7 @@ def repl(cfg: Config) -> None:
 
     while True:
         try:
-            line = input(f"{ui.BOLD}{ui.GREEN}nv>{ui.RESET} ").strip()
+            line = input(f"{ui.c('prompt')}nv>{ui.RESET} ").strip()
         except EOFError:
             ui.out("\nbye")
             return
@@ -330,6 +368,9 @@ def repl(cfg: Config) -> None:
                     continue
                 _handle_load(cfg, agent, parts[1],
                              parts[2] if len(parts) > 2 else "", agents_md)
+            elif cmd == "/minimize":
+                ui.CONFIRM.reset()
+                run_minimizer(cfg, agents_md)
             elif cmd == "/undo":
                 cp = checkpoint.load_last(cfg.root)
                 if not cp:
@@ -356,6 +397,32 @@ def repl(cfg: Config) -> None:
                 agent.messages.extend(prev["messages"])
                 ui.info(f"restored {len(prev['messages'])} messages from "
                         f"{prev.get('time', '?')} (agent: {agent.kind})")
+            elif cmd == "/theme":
+                arg = line.split(maxsplit=1)[1].strip() if len(parts) > 1 else ""
+                if not arg:
+                    ui.out(theme.describe(cfg.theme))
+                elif arg.lower() == "reset":
+                    theme.reset()
+                    cfg.theme = {}
+                    save_global(cfg)
+                else:
+                    patch = theme.from_prompt(cfg, arg)
+                    if patch:
+                        theme.apply(patch)
+                        cfg.theme.update(patch)
+                        save_global(cfg)
+                        ui.info("theme saved (/theme reset restores defaults)")
+            elif cmd == "/style":
+                arg = line.split(maxsplit=1)[1].strip() if len(parts) > 1 else ""
+                if not arg:
+                    ui.out(cfg.personality or
+                           "(neutral — set one with /style <description>)")
+                else:
+                    cfg.personality = "" if arg.lower() in ("off", "none",
+                                                            "reset") else arg
+                    save_global(cfg)
+                    ui.info(f"answer style: {cfg.personality or 'neutral'} "
+                            "(saved, applies from the next message)")
             elif cmd == "/note":
                 if len(parts) > 1:
                     session.add_note(cfg.root, line.split(maxsplit=1)[1])

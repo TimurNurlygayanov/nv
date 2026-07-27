@@ -35,6 +35,23 @@ CYAN = "\x1b[36m"
 
 _io_lock = threading.RLock()
 
+# semantic color roles — the theme module rewrites these at runtime
+DEFAULT_CODES = {
+    "prompt": BOLD + GREEN,
+    "banner": BOLD + CYAN,
+    "info": DIM,
+    "warn": YELLOW,
+    "error": RED,
+    "tool": MAGENTA,
+    "diff_add": GREEN,
+    "diff_del": RED,
+}
+CODES = dict(DEFAULT_CODES)
+
+
+def c(role: str) -> str:
+    return CODES.get(role, "")
+
 
 def out(text: str = "", color: str = "", end: str = "\n") -> None:
     with _io_lock:
@@ -48,19 +65,19 @@ def stream_token(token: str) -> None:
 
 
 def banner(text: str) -> None:
-    out(f"\n{BOLD}{CYAN}── {text} {'─' * max(0, 60 - len(text))}{RESET}")
+    out(f"\n{c('banner')}── {text} {'─' * max(0, 60 - len(text))}{RESET}")
 
 
 def info(text: str) -> None:
-    out(text, DIM)
+    out(text, c("info"))
 
 
 def warn(text: str) -> None:
-    out(text, YELLOW)
+    out(text, c("warn"))
 
 
 def error(text: str) -> None:
-    out(text, RED)
+    out(text, c("error"))
 
 
 def render_diff(old: str, new: str, path: str, max_lines: int = 120) -> None:
@@ -71,24 +88,24 @@ def render_diff(old: str, new: str, path: str, max_lines: int = 120) -> None:
     with _io_lock:
         for line in shown:
             if line.startswith("+") and not line.startswith("+++"):
-                out(line, GREEN)
+                out(line, c("diff_add"))
             elif line.startswith("-") and not line.startswith("---"):
-                out(line, RED)
+                out(line, c("diff_del"))
             elif line.startswith("@@"):
                 out(line, CYAN)
             else:
                 out(line)
         if len(lines) > max_lines:
-            out(f"... {len(lines) - max_lines} more diff lines hidden ...", DIM)
+            out(f"... {len(lines) - max_lines} more diff lines hidden ...", c("info"))
 
 
 def colorize_git_diff(diff_text: str) -> None:
     with _io_lock:
         for line in diff_text.splitlines():
             if line.startswith("+") and not line.startswith("+++"):
-                out(line, GREEN)
+                out(line, c("diff_add"))
             elif line.startswith("-") and not line.startswith("---"):
-                out(line, RED)
+                out(line, c("diff_del"))
             elif line.startswith(("@@", "diff --git")):
                 out(line, CYAN)
             else:
@@ -106,10 +123,12 @@ class Confirmer:
     def reset(self) -> None:
         self.approve_all = False
 
-    def ask(self, prompt: str, agent_name: str = "") -> tuple[bool, str]:
-        """Returns (approved, user_feedback)."""
+    def ask(self, prompt: str, agent_name: str = "",
+            force: bool = False) -> tuple[bool, str]:
+        """Returns (approved, user_feedback). force=True ignores yes-to-all —
+        used for changes that must always be looked at (e.g. large diffs)."""
         with self._lock:
-            if self.approve_all:
+            if self.approve_all and not force:
                 return True, ""
             tag = f"[{agent_name}] " if agent_name else ""
             with _io_lock:

@@ -7,6 +7,7 @@ staging area are left untouched). /undo restores files to that snapshot.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -63,6 +64,19 @@ def diff_stat(root: Path, commit: str) -> str:
     stat = _git(root, "diff", "--stat", commit).stdout.strip()
     _git(root, "reset", "-q")
     return stat
+
+
+def changed_lines_since(root: Path, commit: str) -> int:
+    """Total inserted+deleted lines since the checkpoint."""
+    stat = diff_stat(root, commit)
+    total = 0
+    m = re.search(r"(\d+) insertion", stat)
+    if m:
+        total += int(m.group(1))
+    m = re.search(r"(\d+) deletion", stat)
+    if m:
+        total += int(m.group(1))
+    return total
 
 
 def restore(root: Path, commit: str) -> str:

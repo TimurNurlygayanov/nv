@@ -156,7 +156,7 @@ def synthesize(cfg: Config, request: str, error_ctx: str = "") -> str | None:
     Returns the approved command, or None."""
     shell = _shell_name(cfg)
     client = OllamaClient(cfg.host, cfg.model, num_ctx=min(cfg.num_ctx, 8192),
-                          temperature=0.1)
+                          temperature=0.1, num_predict=200)
     messages = [
         {"role": "system", "content":
             f"You convert a request into exactly ONE {shell} command line "

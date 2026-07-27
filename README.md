@@ -105,6 +105,41 @@ One-shot mode: `nv "add a --verbose flag to cli.py"` or `nv --team 3 "task"`.
 | `/model`, `/host`, `/config` | settings |
 | `/new` | reset conversation history |
 
+## Console theme by prompt
+
+Ask for the look you want, in the chat or via `/theme`:
+
+```
+nv> make all text green and background black, increase the font size
+nv> /theme orange banners and a purple prompt
+nv> /theme reset
+```
+
+The agent's `configure_ui` tool (or `/theme <words>`) turns the request into
+theme changes: nv's own colors (prompt, banners, info, warnings, diff),
+the terminal's default text/background via OSC escape codes, and the console
+font size via the Windows console API. Applied instantly and saved to
+`~/.nv.json`, so the look survives restarts. Honest limitation: Windows
+Terminal ignores the font-size API — nv tells you and points to
+Ctrl+Plus / its settings; colors work everywhere modern.
+
+## Answer personality
+
+Work stays rigorous; the prose gets character. Set it in the chat
+("answer me in a playful flirty tone") or directly:
+
+```
+nv> /style playful and lightly flirty
+nv> /style dry sarcasm
+nv> /style off
+```
+
+Guardrails are built into the prompt: code, diffs, commands, commit
+messages and generated documents stay strictly professional; errors and
+risks are stated plainly before any charm is applied. Style affects the
+chat agents (coder, ask, writer) — reviewer/planner/architect output stays
+untouched. Saved in `~/.nv.json`, applies from the next message.
+
 ## Terminal passthrough
 
 The chat console is also your terminal — no window switching:
@@ -182,6 +217,31 @@ sent back to the agent as a correction.
   host; `/scan` only probes explicitly known addresses (`OLLAMA_HOST`,
   saved host, localhost) — it never scans the network.
 
+## Minimalism enforcement
+
+"One line that does the job, not two million" is enforced mechanically,
+not just requested politely:
+
+1. **Prompt rule** — every agent carries a mandatory brevity rule: short
+   final answers, no pasting back file contents, touch nothing beyond the
+   ask.
+2. **Hard token cap** — every reply is generated with Ollama's
+   `num_predict` limit (`max_answer_tokens`, default 2048), so the model
+   physically cannot produce a wall of text. Auxiliary calls are capped
+   tighter (command synthesis 200, theme 300, file selection 500).
+3. **Diff-size gate** — any single change touching more than
+   `max_diff_lines` (default 60) prints a LARGE CHANGE warning and demands
+   explicit approval — even if you pressed `a` (yes-to-all). Rejecting it
+   tells the model to make the smallest change that solves the task or
+   split it into steps.
+4. **Minimizer pass** — if a finished task still changed more lines than
+   the limit, nv offers to run a dedicated `minimizer` agent: it re-reads
+   the diff and shrinks it (dead code, needless refactors, verbose
+   constructs) with behavior kept identical, every cut confirmed by you.
+   Run it any time with `/minimize`.
+
+Both limits are configurable in `.nv.json`.
+
 ## Local-model optimizations
 
 Built-in agent configs are tuned for small/local models:
@@ -206,4 +266,5 @@ Built-in agent configs are tuned for small/local models:
 `~/.nv.json` (global) or `.nv.json` in the project (overrides). Keys:
 `host`, `model`, `review_model`, `num_ctx`, `temperature`, `max_steps`, `plan_first`,
 `max_read_lines`, `max_search_hits`, `max_tool_output`, `command_timeout`,
-`history_char_budget`, `confirm_over_seconds`, `shell`.
+`history_char_budget`, `confirm_over_seconds`, `shell`, `theme`,
+`personality`, `max_answer_tokens`, `max_diff_lines`.

@@ -5,12 +5,13 @@ for confirmation and shows a preview first.
 """
 from __future__ import annotations
 
+import difflib
 import fnmatch
 import re
 import subprocess
 from pathlib import Path
 
-from nv.config import Config
+from nv.config import Config, save_global
 from nv.sandbox import Sandbox, SandboxError
 from nv import checkpoint, session, ui
 
@@ -26,6 +27,12 @@ TEXT_EXT_HINT = {".py", ".js", ".ts", ".tsx", ".jsx", ".json", ".md", ".txt",
 
 def _skip(name: str) -> bool:
     return any(fnmatch.fnmatch(name, pat) for pat in SKIP_DIRS)
+
+
+def _changed_lines(old: str, new: str) -> int:
+    return sum(1 for ln in difflib.unified_diff(
+        old.splitlines(), new.splitlines(), lineterm="")
+        if ln.startswith(("+", "-")) and not ln.startswith(("+++", "---")))
 
 
 class Toolbox:
@@ -122,9 +129,20 @@ class Toolbox:
                 return f"no changes: {path} already has this exact content"
         ui.banner(f"{self.agent_name} wants to write {path}")
         ui.render_diff(old, content, path)
-        ok, feedback = ui.CONFIRM.ask(f"write {path}?", self.agent_name)
+        changed = _changed_lines(old, content)
+        big = changed > self.cfg.max_diff_lines
+        if big:
+            ui.warn(f"LARGE CHANGE: {changed} changed lines "
+                    f"(minimal-change limit is {self.cfg.max_diff_lines}) — "
+                    "needs explicit approval")
+        ok, feedback = ui.CONFIRM.ask(f"write {path}?", self.agent_name,
+                                      force=big)
         if not ok:
-            return f"REJECTED by user. {('User says: ' + feedback) if feedback else 'Do not retry the same change.'}"
+            hint = (f" The change was too large ({changed} lines > "
+                    f"{self.cfg.max_diff_lines}): make the smallest change "
+                    "that solves the task, or split it into steps."
+                    if big else " Do not retry the same change.")
+            return f"REJECTED by user.{(' User says: ' + feedback) if feedback else hint}"
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
         return f"written: {path} ({len(content.splitlines())} lines)"
@@ -147,9 +165,20 @@ class Toolbox:
         new_content = text.replace(old_text, new_text, 1)
         ui.banner(f"{self.agent_name} wants to edit {path}")
         ui.render_diff(text, new_content, path)
-        ok, feedback = ui.CONFIRM.ask(f"edit {path}?", self.agent_name)
+        changed = _changed_lines(text, new_content)
+        big = changed > self.cfg.max_diff_lines
+        if big:
+            ui.warn(f"LARGE CHANGE: {changed} changed lines "
+                    f"(minimal-change limit is {self.cfg.max_diff_lines}) — "
+                    "needs explicit approval")
+        ok, feedback = ui.CONFIRM.ask(f"edit {path}?", self.agent_name,
+                                      force=big)
         if not ok:
-            return f"REJECTED by user. {('User says: ' + feedback) if feedback else 'Do not retry the same change.'}"
+            hint = (f" The change was too large ({changed} lines > "
+                    f"{self.cfg.max_diff_lines}): make the smallest change "
+                    "that solves the task, or split it into steps."
+                    if big else " Do not retry the same change.")
+            return f"REJECTED by user.{(' User says: ' + feedback) if feedback else hint}"
         p.write_text(new_content, encoding="utf-8")
         return f"edited: {path}"
 
@@ -215,6 +244,29 @@ class Toolbox:
             return f"REJECTED by user. {('User says: ' + feedback) if feedback else ''}"
         return checkpoint.restore(self.cfg.root, cp)
 
+    def configure_ui(self, changes: dict) -> str:
+        """Apply console-appearance changes (announced, not confirmed —
+        instantly visible and reversible with /theme reset)."""
+        from nv import theme  # theme imports ollama; keep tools import light
+        applied: list[str] = []
+        personality = changes.pop("personality", None)
+        if personality is not None:
+            self.cfg.personality = str(personality).strip()
+            applied.append(f"answer personality: "
+                           f"{self.cfg.personality or 'neutral (off)'}")
+        patch, errors = theme.validate(changes)
+        if not patch and not applied:
+            return ("ERROR: no valid changes. " + "; ".join(errors)
+                    if errors else "ERROR: nothing to change")
+        if patch:
+            applied += theme.apply(patch)
+            self.cfg.theme.update(patch)
+        save_global(self.cfg)
+        result = "applied: " + "; ".join(applied)
+        if errors:
+            result += " | ignored: " + "; ".join(errors)
+        return result + " (saved; /theme reset and /style off restore defaults)"
+
     def save_note(self, text: str) -> str:
         """Append a durable fact to .nv/notes.md (announced, not confirmed —
         it never touches project code)."""
@@ -257,6 +309,9 @@ class Toolbox:
                                           str(args.get("goal", "")))
             if name == "undo_changes":
                 return self.undo_changes()
+            if name == "configure_ui":
+                return self.configure_ui(
+                    {k: v for k, v in args.items() if k != "name"})
             return f"ERROR: unknown tool '{name}'"
         except SandboxError as e:
             return f"ERROR: {e}"
@@ -348,6 +403,31 @@ def tool_schemas(names: list[str]) -> list[dict]:
                            "approve.",
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
+        "configure_ui": {
+            "description": "Change the UX of this chat console when the user "
+                           "asks: colors, font size, or the assistant's "
+                           "answer personality. Colors are names (green, "
+                           "black, cyan, orange...) or #rrggbb. Include only "
+                           "what the user asked to change.",
+            "parameters": {"type": "object", "properties": {
+                "fg": {"type": "string", "description": "default text color"},
+                "bg": {"type": "string", "description": "background color"},
+                "prompt": {"type": "string", "description": "nv> prompt color"},
+                "banner": {"type": "string", "description": "section header color"},
+                "info": {"type": "string", "description": "status line color"},
+                "warn": {"type": "string"},
+                "error": {"type": "string"},
+                "tool": {"type": "string", "description": "tool-call line color"},
+                "diff_add": {"type": "string"},
+                "diff_del": {"type": "string"},
+                "font_size": {"type": "string",
+                              "description": "8..72, or relative like '+2'/'-4'"},
+                "personality": {"type": "string",
+                                "description": "answer style, e.g. 'playful "
+                                               "and lightly flirty', 'dry "
+                                               "sarcasm'; empty string = off"}},
+                "required": []},
+        },
         "save_note": {
             "description": "Save ONE short durable fact about the project to "
                            "the shared notes (env var meaning, gotcha, flaky "
@@ -364,5 +444,5 @@ def tool_schemas(names: list[str]) -> list[dict]:
 
 CODER_TOOLS = ["list_files", "read_file", "search", "git_diff",
                "write_file", "edit_file", "run_command", "save_note",
-               "analyze_files", "undo_changes"]
+               "analyze_files", "undo_changes", "configure_ui"]
 READONLY_TOOLS = ["list_files", "read_file", "search", "git_diff"]

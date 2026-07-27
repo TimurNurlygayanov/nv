@@ -26,6 +26,10 @@ DEFAULTS = {
     "history_char_budget": 45000,  # ~ chars before history compaction kicks in
     "confirm_over_seconds": 60,  # ask before jobs estimated longer than this
     "shell": "",                 # shell for !commands: powershell/cmd/bash ('' = auto)
+    "theme": {},                 # console theme, managed via /theme or the agent
+    "personality": "",           # answer style for chat agents, e.g. "flirty"
+    "max_answer_tokens": 2048,   # hard cap on model output per reply (num_predict)
+    "max_diff_lines": 60,        # bigger changes always need explicit approval
 }
 
 
@@ -45,6 +49,10 @@ class Config:
     history_char_budget: int = DEFAULTS["history_char_budget"]
     confirm_over_seconds: int = DEFAULTS["confirm_over_seconds"]
     shell: str = DEFAULTS["shell"]
+    theme: dict = field(default_factory=dict)
+    personality: str = DEFAULTS["personality"]
+    max_answer_tokens: int = DEFAULTS["max_answer_tokens"]
+    max_diff_lines: int = DEFAULTS["max_diff_lines"]
     root: Path = field(default_factory=Path.cwd)
 
     @property
@@ -64,6 +72,7 @@ def load_config(root: Path) -> Config:
     data.update(_read_json(GLOBAL_CONFIG))
     data.update(_read_json(root / PROJECT_CONFIG_NAME))
     known = {k: v for k, v in data.items() if k in DEFAULTS}
+    known["theme"] = dict(known.get("theme") or {})  # never share the default
     cfg = Config(**known)
     cfg.root = root.resolve()
     return cfg
