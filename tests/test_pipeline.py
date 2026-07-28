@@ -176,7 +176,9 @@ class CommandDetectionTests(unittest.TestCase):
         from nv import terminal
         for line in ("ls", "ls -la", "git status", "git log --oneline",
                      "pwd", "cd ..", "cd partner-tests", "cat nv/cli.py",
-                     "pip freeze"):
+                     "pip freeze", "git checkout master", "git pull",
+                     "git commit -m fix", "npm install", "npm run build",
+                     "make test", "docker compose up -d"):
             self.assertTrue(terminal.looks_like_command(line), line)
 
     def test_bare_arg_naming_existing_path_is_a_command(self):

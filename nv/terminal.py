@@ -48,17 +48,31 @@ _NL_WORDS = {"the", "a", "an", "to", "in", "on", "of", "for", "all", "and",
              "файлы", "что", "как", "почему", "сделай", "запусти", "покажи"}
 
 
-# args that may follow a bare command without an explicit ! prefix
+# recognized subcommands: '<cmd> <sub> ...' is trusted as a real command
+# line even when later args are bare words (branch names, package names).
+# These are the USER'S own typed commands — everyday mutating subcommands
+# belong here too; the strictness only exists to keep natural-language
+# prompts from executing.
 SUBCOMMANDS = {
     "git": {"status", "diff", "log", "show", "branch", "stash", "blame",
-            "tag", "describe", "shortlog", "worktree"},
-    "docker": {"ps", "images", "info", "version", "stats"},
-    "kubectl": {"get", "describe", "version", "config", "logs", "top"},
-    "npm": {"ls", "list", "outdated", "test", "version", "audit"},
-    "pip": {"list", "show", "freeze", "check"},
-    "cargo": {"build", "test", "check", "clippy", "fmt"},
-    "go": {"build", "test", "vet", "version", "env"},
-    "helm": {"list", "ls", "status", "version"},
+            "tag", "describe", "shortlog", "worktree", "checkout", "switch",
+            "pull", "push", "fetch", "add", "commit", "restore", "reset",
+            "merge", "rebase", "grep", "clean", "mv", "rm", "cherry-pick"},
+    "docker": {"ps", "images", "info", "version", "stats", "compose",
+               "build", "run", "exec", "logs", "stop", "start", "restart",
+               "pull"},
+    "kubectl": {"get", "describe", "version", "config", "logs", "top",
+                "apply", "rollout", "exec", "scale", "delete",
+                "port-forward"},
+    "npm": {"ls", "list", "outdated", "test", "version", "audit", "run",
+            "install", "ci", "i"},
+    "pip": {"list", "show", "freeze", "check", "install", "uninstall",
+            "download"},
+    "cargo": {"build", "test", "check", "clippy", "fmt", "run", "add",
+              "install"},
+    "go": {"build", "test", "vet", "version", "env", "run", "mod", "get"},
+    "helm": {"list", "ls", "status", "version", "install", "upgrade",
+             "rollback"},
 }
 
 
@@ -85,6 +99,11 @@ def looks_like_command(line: str, cwd: str = "") -> bool:
         return False
     if first == "cd":  # its argument is a dir name by definition;
         return len(tokens) <= 2  # the cd builtin errors clearly if wrong
+    if first == "make" and len(tokens) == 2:
+        return True  # 'make <target>' — make errors clearly on a bad target
+    subs = SUBCOMMANDS.get(first)
+    if subs and len(tokens) > 1 and tokens[1].lower() in subs:
+        return True  # '<cmd> <known sub> ...' — trust the rest of the line
     base = Path(cwd or ".")
 
     def exists(tok: str) -> bool:
