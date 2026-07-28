@@ -342,6 +342,12 @@ def repl(cfg: Config) -> None:
     ask_agent: Agent | None = None
     term_buf = terminal.TerminalBuffer()
     ui.init_history(session.state_dir(cfg.root) / "input-history")
+    ui.setup_completion(
+        ["/help", "/ask", "/paste", "/load", "/diff", "/undo", "/minimize",
+         "/resume", "/note", "/theme", "/style", "/plan", "/team", "/review",
+         "/agents", "/agent", "/scan", "/model", "/host", "/config", "/new",
+         "/exit", "/quit"] + sorted(terminal.KNOWN),
+        lambda: term_buf.cwd or str(cfg.root))
 
     def run_shell(cmd: str) -> None:
         rc, out = terminal.run(cfg, cmd, term_buf)
@@ -391,7 +397,7 @@ def repl(cfg: Config) -> None:
             if cmd:
                 run_shell(cmd)
             continue
-        if terminal.looks_like_command(line):
+        if terminal.looks_like_command(line, term_buf.cwd or str(cfg.root)):
             ui.info(f"[shell] {line}")
             run_shell(line)
             continue

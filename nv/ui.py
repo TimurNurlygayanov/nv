@@ -95,6 +95,49 @@ def stream_thinking(token: str) -> None:
     sys.stdout.flush()
 
 
+def completion_matches(text: str, begidx: int, cwd: str,
+                       commands: list[str]) -> list[str]:
+    """Candidates for tab completion. First word: known commands and slash
+    commands. Arguments: files/dirs relative to the current shell cwd."""
+    if begidx == 0:
+        low = text.lower()
+        return sorted(c for c in commands if c.lower().startswith(low))
+    t = text.strip("\"'").replace("\\", "/")
+    d, _, prefix = t.rpartition("/")
+    from pathlib import Path
+    folder = Path(cwd) / d if d else Path(cwd)
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return []
+    out = []
+    for n in names:
+        if n.lower().startswith(prefix.lower()):
+            full = (d + "/" if d else "") + n
+            if (folder / n).is_dir():
+                full += "/"
+            out.append(full)
+    return sorted(out)
+
+
+def setup_completion(commands: list[str], get_cwd) -> None:
+    """Enable tab completion in input() (no-op without readline)."""
+    if not _HAS_READLINE:
+        return
+
+    def complete(text: str, state: int):
+        try:
+            matches = completion_matches(
+                text, readline.get_begidx(), get_cwd(), commands)
+        except Exception:  # a completer must never crash the prompt
+            matches = []
+        return matches[state] if state < len(matches) else None
+
+    readline.set_completer(complete)
+    readline.set_completer_delims(" \t")
+    readline.parse_and_bind("tab: complete")
+
+
 def init_history(path) -> None:
     """Persist input history across sessions (no-op without readline)."""
     if not _HAS_READLINE:

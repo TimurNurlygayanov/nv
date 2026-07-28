@@ -175,8 +175,20 @@ class CommandDetectionTests(unittest.TestCase):
     def test_real_commands_still_detected(self):
         from nv import terminal
         for line in ("ls", "ls -la", "git status", "git log --oneline",
-                     "pwd", "cd ..", "cat nv/cli.py", "pip freeze"):
+                     "pwd", "cd ..", "cd partner-tests", "cat nv/cli.py",
+                     "pip freeze"):
             self.assertTrue(terminal.looks_like_command(line), line)
+
+    def test_bare_arg_naming_existing_path_is_a_command(self):
+        import tempfile as tf
+        from nv import terminal
+        root = Path(tf.mkdtemp())
+        (root / "README").write_text("x", encoding="utf-8")
+        (root / "src").mkdir()
+        self.assertTrue(terminal.looks_like_command("cat README", str(root)))
+        self.assertTrue(terminal.looks_like_command("ls src", str(root)))
+        self.assertFalse(
+            terminal.looks_like_command("cat something-imaginary", str(root)))
 
 
 class FileWriteTests(unittest.TestCase):
@@ -213,6 +225,38 @@ class FileWriteTests(unittest.TestCase):
             out = tb.edit_file("a.txt", "two", "three")
         self.assertIn("changed on disk", out)
         self.assertIn("TWO-changed-outside", f.read_text(encoding="utf-8"))
+
+
+class CompletionTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile as tf
+        self.root = Path(tf.mkdtemp())
+        (self.root / "partner-tests").mkdir()
+        (self.root / "payments").mkdir()
+        (self.root / "README.md").write_text("x", encoding="utf-8")
+        (self.root / "partner-tests" / "conftest.py").write_text(
+            "x", encoding="utf-8")
+
+    def test_first_word_completes_commands(self):
+        cmds = ["/help", "/host", "git", "grep"]
+        self.assertEqual(ui.completion_matches("/h", 0, str(self.root), cmds),
+                         ["/help", "/host"])
+        self.assertEqual(ui.completion_matches("gr", 0, str(self.root), cmds),
+                         ["grep"])
+
+    def test_argument_completes_paths_with_dir_slash(self):
+        got = ui.completion_matches("pa", 3, str(self.root), [])
+        self.assertEqual(got, ["partner-tests/", "payments/"])
+        got = ui.completion_matches("RE", 3, str(self.root), [])
+        self.assertEqual(got, ["README.md"])
+
+    def test_argument_completes_inside_subdir(self):
+        got = ui.completion_matches("partner-tests/con", 3, str(self.root), [])
+        self.assertEqual(got, ["partner-tests/conftest.py"])
+
+    def test_unreadable_folder_is_silent(self):
+        self.assertEqual(
+            ui.completion_matches("nope/xx", 3, str(self.root), []), [])
 
 
 class DiscoverTests(unittest.TestCase):

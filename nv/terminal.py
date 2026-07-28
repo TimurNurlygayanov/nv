@@ -20,6 +20,7 @@ import os
 import re
 import shutil
 import subprocess
+from pathlib import Path
 
 from nv import ui
 from nv.config import Config
@@ -68,11 +69,12 @@ def _arg_ok(first: str, tok: str) -> bool:
             or t in SUBCOMMANDS.get(first, set()))
 
 
-def looks_like_command(line: str) -> bool:
+def looks_like_command(line: str, cwd: str = "") -> bool:
     """Conservative: a bare line auto-runs only when the first word is a
     known command AND every argument looks like a flag/path/number/known
-    subcommand. 'make coverage report' or 'go faster' must NOT execute —
-    anything ambiguous goes to the model instead (use ! to force)."""
+    subcommand, or names something that exists in cwd. 'make coverage
+    report' or 'go faster' must NOT execute — anything ambiguous goes to
+    the model instead (use ! to force)."""
     tokens = line.split()
     if not tokens or line.startswith(("/", "!")):
         return False
@@ -81,7 +83,17 @@ def looks_like_command(line: str) -> bool:
         return False
     if any(t.lower().strip(",.?") in _NL_WORDS for t in tokens[1:]):
         return False
-    return all(_arg_ok(first, t) for t in tokens[1:])
+    if first == "cd":  # its argument is a dir name by definition;
+        return len(tokens) <= 2  # the cd builtin errors clearly if wrong
+    base = Path(cwd or ".")
+
+    def exists(tok: str) -> bool:
+        try:
+            return (base / tok.strip("\"'")).exists()
+        except OSError:
+            return False
+
+    return all(_arg_ok(first, t) or exists(t) for t in tokens[1:])
 
 
 class TerminalBuffer:
