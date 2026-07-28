@@ -7,17 +7,22 @@ themselves after the first real calls.
 from __future__ import annotations
 
 import json
+import os
+import tempfile
+import threading
 from pathlib import Path
 
 PERF_FILE = Path.home() / ".nv-perf.json"
 _ALPHA = 0.3  # EMA weight of the newest measurement
+_LOCK = threading.Lock()  # team mode records from parallel threads
 
 
 def _load() -> dict:
     try:
-        return json.loads(PERF_FILE.read_text(encoding="utf-8"))
+        data = json.loads(PERF_FILE.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
+    return data if isinstance(data, dict) else {}
 
 
 def record(host: str, model: str, chunk: dict) -> None:
@@ -29,22 +34,28 @@ def record(host: str, model: str, chunk: dict) -> None:
     gen_tps = ec / (ed / 1e9)
     prompt_tps = pc / (pd / 1e9) if pc and pd else None
 
-    data = _load()
-    key = f"{host}|{model}"
-    cur = data.get(key, {})
-
     def ema(old, new):
         return new if not old else old * (1 - _ALPHA) + new * _ALPHA
 
-    cur["gen_tps"] = ema(cur.get("gen_tps"), gen_tps)
-    if prompt_tps:
-        cur["prompt_tps"] = ema(cur.get("prompt_tps"), prompt_tps)
-    cur["n"] = cur.get("n", 0) + 1
-    data[key] = cur
-    try:
-        PERF_FILE.write_text(json.dumps(data), encoding="utf-8")
-    except OSError:
-        pass
+    with _LOCK:
+        data = _load()
+        key = f"{host}|{model}"
+        cur = data.get(key, {})
+        if not isinstance(cur, dict):
+            cur = {}
+        cur["gen_tps"] = ema(cur.get("gen_tps"), gen_tps)
+        if prompt_tps:
+            cur["prompt_tps"] = ema(cur.get("prompt_tps"), prompt_tps)
+        cur["n"] = cur.get("n", 0) + 1
+        data[key] = cur
+        try:  # atomic replace: a crash must not truncate the stats file
+            fd, tmp = tempfile.mkstemp(dir=str(PERF_FILE.parent),
+                                       prefix=".nv-perf.", suffix=".tmp")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(data))
+            os.replace(tmp, PERF_FILE)
+        except OSError:
+            pass
 
 
 def speeds(host: str, model: str) -> tuple[float, float] | None:

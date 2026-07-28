@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -72,26 +73,37 @@ def detect_mode(pieces: list[tuple[str, str]]) -> str:
 def inventory(base: Path, root: Path) -> list[dict]:
     """Text files under base with a short preview (md headings preferred)."""
     entries: list[dict] = []
-    for p in sorted(base.rglob("*")):
-        rel = p.relative_to(root)
-        if any(_skip(part) for part in rel.parts) or not p.is_file():
-            continue
-        if p.suffix.lower() not in TEXT_EXT_HINT and p.suffix.lower() != ".rst":
-            continue
-        try:
-            if p.stat().st_size > 2_000_000:
+    capped = False
+    for dirpath, dirnames, filenames in os.walk(base):
+        dirnames[:] = sorted(d for d in dirnames if not _skip(d))
+        for fn in sorted(filenames):
+            p = Path(dirpath) / fn
+            rel = p.relative_to(root)
+            if _skip(fn):
                 continue
-            text = p.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        lines = text.splitlines()
-        headings = [ln.strip() for ln in lines if ln.lstrip().startswith("#")][:6]
-        preview = "; ".join(headings) if headings else \
-            " / ".join(ln.strip()[:60] for ln in lines if ln.strip())[:120]
-        entries.append({"path": str(rel).replace("\\", "/"),
-                        "lines": len(lines), "preview": preview[:120]})
-        if len(entries) >= MAX_INVENTORY:
+            if p.suffix.lower() not in TEXT_EXT_HINT and p.suffix.lower() != ".rst":
+                continue
+            try:
+                if p.stat().st_size > 2_000_000:
+                    continue
+                text = p.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            lines = text.splitlines()
+            headings = [ln.strip() for ln in lines if ln.lstrip().startswith("#")][:6]
+            preview = "; ".join(headings) if headings else \
+                " / ".join(ln.strip()[:60] for ln in lines if ln.strip())[:120]
+            entries.append({"path": str(rel).replace("\\", "/"),
+                            "lines": len(lines), "preview": preview[:120]})
+            if len(entries) >= MAX_INVENTORY:
+                capped = True
+                break
+        if capped:
             break
+    if capped:
+        ui.info(f"note: inventory capped at {MAX_INVENTORY} files — some "
+                "files were not considered; point at a narrower folder for "
+                "full coverage")
     return entries
 
 
@@ -261,7 +273,20 @@ def interactive_pipeline(cfg: Config, target: Path,
             return None
         source = f"{len(pieces)} files under {p.name}"
     else:
-        pieces = [(p.name, p.read_text(encoding="utf-8", errors="replace"))]
+        try:
+            size = p.stat().st_size
+            if size > 50_000_000:  # a multi-GB log must not OOM the console
+                ui.warn(f"{p.name} is {size // 1_000_000} MB — analyzing "
+                        "the last 20 MB only (the tail is where failures are)")
+                with open(p, "rb") as f:
+                    f.seek(-20_000_000, os.SEEK_END)
+                    text = f.read().decode("utf-8", errors="replace")
+            else:
+                text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            ui.error(f"cannot read {p.name}: {e}")
+            return None
+        pieces = [(p.name, text)]
         source = p.name
 
     total_chars = sum(len(t) for _, t in pieces)
@@ -335,32 +360,44 @@ def summarize_pieces(cfg: Config, pieces: list[tuple[str, str]],
     extract_prompt = _MODE_PROMPTS[mode]
 
     partials: list[str] = []
+    interrupted = False
     started = time.time()
-    for i, (label, chunk) in enumerate(labeled, 1):
-        reply = client.chat([
-            {"role": "system", "content": _EXTRACT_SYS},
-            {"role": "user",
-             "content": f"{focus}{extract_prompt}\n\n{chunk}"},
-        ])
-        content = strip_thinking(reply.get("content") or "").strip()
-        if content and "nothing relevant" not in content.lower()[:40] \
-                and "nothing notable" not in content.lower()[:40]:
-            partials.append(f"[{label}] {content}")
+    try:
+        for i, (label, chunk) in enumerate(labeled, 1):
+            reply = client.chat([
+                {"role": "system", "content": _EXTRACT_SYS},
+                {"role": "user",
+                 "content": f"{focus}{extract_prompt}\n\n{chunk}"},
+            ])
+            content = strip_thinking(reply.get("content") or "").strip()
+            if content and "nothing relevant" not in content.lower()[:40] \
+                    and "nothing notable" not in content.lower()[:40]:
+                partials.append(f"[{label}] {content}")
 
-        elapsed = time.time() - started
-        avg = elapsed / i
-        if i < len(labeled):
-            note(f"chunk {i}/{len(labeled)} done — elapsed "
-                 f"{perf.humanize(elapsed)}, ETA {perf.humanize(avg * (len(labeled) - i))}")
-        if i == 1 and confirm_cb and len(labeled) > 2:
-            projected = avg * len(labeled) * 1.15  # + merge overhead
-            if projected > confirm_over and not confirm_cb(projected, len(labeled)):
-                return None
+            elapsed = time.time() - started
+            avg = elapsed / i
+            if i < len(labeled):
+                note(f"chunk {i}/{len(labeled)} done — elapsed "
+                     f"{perf.humanize(elapsed)}, ETA {perf.humanize(avg * (len(labeled) - i))}")
+            if i == 1 and confirm_cb and len(labeled) > 2:
+                projected = avg * len(labeled) * 1.15  # + merge overhead
+                if projected > confirm_over and not confirm_cb(projected, len(labeled)):
+                    return None
+    except KeyboardInterrupt:
+        # don't throw away chunks that were already paid for in model time
+        if not partials:
+            return None
+        interrupted = True
+        note(f"\ninterrupted — merging the {len(partials)} chunk(s) "
+             "already extracted")
 
     if not partials:
         digest = "nothing relevant to the question was found in the input"
     else:
         digest = _merge(client, partials, focus, note)
+    if interrupted:
+        digest += "\n\n[note: analysis was interrupted — this digest covers " \
+                  "only part of the input]"
     if capped:
         digest += f"\n\n[note: {capped} trailing chunks were not processed]"
     return digest

@@ -11,7 +11,7 @@ import re
 import subprocess
 from pathlib import Path
 
-CHECKPOINT_FILE = ".nv/checkpoint.json"
+from nv import session
 
 
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
@@ -40,16 +40,15 @@ def create(root: Path) -> str | None:
     commit = _git(root, *args).stdout.strip()
     if not commit:
         return None
-    nv_dir = root / ".nv"
-    nv_dir.mkdir(exist_ok=True)
-    (root / CHECKPOINT_FILE).write_text(
+    (session.state_dir(root) / "checkpoint.json").write_text(
         json.dumps({"commit": commit}), encoding="utf-8")
     return commit
 
 
 def load_last(root: Path) -> str | None:
     try:
-        data = json.loads((root / CHECKPOINT_FILE).read_text(encoding="utf-8"))
+        data = json.loads((session.state_dir(root) / "checkpoint.json")
+                          .read_text(encoding="utf-8"))
         commit = data.get("commit", "")
     except (OSError, ValueError):
         return None

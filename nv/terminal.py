@@ -10,7 +10,9 @@
 - Interactive programs (vim, less, ...) run attached to the console.
 
 These are the user's own commands: the agent sandbox/denylist does not
-apply, only cwd is pinned to the project root.
+apply. Commands start in the project root; `cd` is handled as a builtin
+and persists for later commands (the agent's own sandbox stays pinned
+to the project root).
 """
 from __future__ import annotations
 
@@ -30,6 +32,7 @@ REPLS = {"python", "py", "ipython", "node"}  # interactive only with no args
 
 # common commands + PowerShell aliases that `which` may not resolve
 KNOWN = {"ls", "dir", "cat", "type", "cp", "copy", "mv", "move", "rm", "del",
+         "cd",
          "echo", "pwd", "gci", "gc", "sls", "git", "python", "py", "pip",
          "uv", "npm", "npx", "node", "pytest", "tox", "ruff", "mypy",
          "docker", "kubectl", "helm", "env", "set", "grep", "find",
@@ -44,14 +47,41 @@ _NL_WORDS = {"the", "a", "an", "to", "in", "on", "of", "for", "all", "and",
              "файлы", "что", "как", "почему", "сделай", "запусти", "покажи"}
 
 
+# args that may follow a bare command without an explicit ! prefix
+SUBCOMMANDS = {
+    "git": {"status", "diff", "log", "show", "branch", "stash", "blame",
+            "tag", "describe", "shortlog", "worktree"},
+    "docker": {"ps", "images", "info", "version", "stats"},
+    "kubectl": {"get", "describe", "version", "config", "logs", "top"},
+    "npm": {"ls", "list", "outdated", "test", "version", "audit"},
+    "pip": {"list", "show", "freeze", "check"},
+    "cargo": {"build", "test", "check", "clippy", "fmt"},
+    "go": {"build", "test", "vet", "version", "env"},
+    "helm": {"list", "ls", "status", "version"},
+}
+
+
+def _arg_ok(first: str, tok: str) -> bool:
+    t = tok.lower()
+    return (t.startswith("-") or t.isdigit()
+            or any(ch in t for ch in "./\\=:*|>\"'")
+            or t in SUBCOMMANDS.get(first, set()))
+
+
 def looks_like_command(line: str) -> bool:
+    """Conservative: a bare line auto-runs only when the first word is a
+    known command AND every argument looks like a flag/path/number/known
+    subcommand. 'make coverage report' or 'go faster' must NOT execute —
+    anything ambiguous goes to the model instead (use ! to force)."""
     tokens = line.split()
     if not tokens or line.startswith(("/", "!")):
         return False
-    first = tokens[0]
-    if first.lower() not in KNOWN and not shutil.which(first):
+    first = tokens[0].lower()
+    if first not in KNOWN and not shutil.which(tokens[0]):
         return False
-    return not any(t.lower().strip(",.?") in _NL_WORDS for t in tokens[1:])
+    if any(t.lower().strip(",.?") in _NL_WORDS for t in tokens[1:]):
+        return False
+    return all(_arg_ok(first, t) for t in tokens[1:])
 
 
 class TerminalBuffer:
@@ -59,6 +89,7 @@ class TerminalBuffer:
 
     def __init__(self) -> None:
         self.entries: list[tuple[str, str]] = []
+        self.cwd: str = ""  # user's shell cwd; "" = project root
 
     def add(self, cmd: str, output: str) -> None:
         self.entries.append((cmd, (output or "").strip()[-3000:]))
@@ -103,6 +134,31 @@ def _shell_args(cfg: Config, cmd: str):
     return cmd, True  # cmd.exe on Windows / sh elsewhere
 
 
+def cwd_label(cfg: Config, buffer: TerminalBuffer) -> str:
+    """Short label of the user's shell cwd, '' when at the project root."""
+    here = buffer.cwd
+    if not here or os.path.abspath(here) == os.path.abspath(cfg.root):
+        return ""
+    rel = os.path.relpath(here, cfg.root)
+    return here if rel.startswith("..") else rel
+
+
+def _change_dir(cfg: Config, cmd: str, buffer: TerminalBuffer) -> tuple[int, str]:
+    target = cmd.split(maxsplit=1)[1].strip().strip("\"'") if " " in cmd else ""
+    base = buffer.cwd or cfg.root
+    new = (cfg.root if not target or target == "~"
+           else os.path.abspath(os.path.join(base, os.path.expanduser(target))))
+    if not os.path.isdir(new):
+        msg = f"no such directory: {new}"
+        ui.error(msg)
+        buffer.add(cmd, msg)
+        return 1, msg
+    buffer.cwd = new
+    ui.info(new)
+    buffer.add(cmd, new)
+    return 0, new
+
+
 def run(cfg: Config, cmd: str, buffer: TerminalBuffer) -> tuple[int, str]:
     """Run a user command; print its output; record it in the buffer.
     Returns (exit_code, captured_output)."""
@@ -110,12 +166,15 @@ def run(cfg: Config, cmd: str, buffer: TerminalBuffer) -> tuple[int, str]:
     if not tokens:
         return 0, ""
     first = tokens[0].lower().rsplit(".", 1)[0]
+    if first == "cd" and len(tokens) <= 2:
+        return _change_dir(cfg, cmd, buffer)
+    cwd = buffer.cwd or cfg.root
     args, use_shell = _shell_args(cfg, cmd)
 
     if first in INTERACTIVE or (first in REPLS and len(tokens) == 1):
         ui.info("[interactive program — output will not be captured]")
         try:
-            subprocess.run(args, shell=use_shell, cwd=cfg.root)
+            subprocess.run(args, shell=use_shell, cwd=cwd)
         except KeyboardInterrupt:
             pass
         buffer.add(cmd, "[interactive session, output not captured]")
@@ -123,7 +182,7 @@ def run(cfg: Config, cmd: str, buffer: TerminalBuffer) -> tuple[int, str]:
 
     try:
         proc = subprocess.run(
-            args, shell=use_shell, cwd=cfg.root, capture_output=True,
+            args, shell=use_shell, cwd=cwd, capture_output=True,
             timeout=max(300, cfg.command_timeout))
     except subprocess.TimeoutExpired:
         ui.error("command timed out")

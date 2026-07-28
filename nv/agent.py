@@ -31,6 +31,7 @@ class Agent:
         )
         self.toolbox = Toolbox(cfg, agent_name=self.name)
         self.schemas = tool_schemas(spec["tools"])
+        self.stop_event = None  # set by team mode for cooperative Ctrl+C
         self._agents_md = agents_md
         self._listing = self.toolbox.list_files(".", max_entries=40)
         self.system = ""
@@ -55,7 +56,10 @@ class Agent:
         return sum(len(m.get("content") or "") for m in self.messages)
 
     def _compact(self) -> None:
-        """Truncate old tool outputs first; if still too big, drop oldest turns."""
+        """Shrink history over budget. Order matters: old tool outputs first,
+        then old assistant/tool turns; USER messages (the original issue and
+        the feedback) survive longest — dropping them is exactly how an
+        agent 'forgets' what it was fixing mid-conversation."""
         budget = self.cfg.history_char_budget
         if self._history_size() <= budget:
             return
@@ -64,10 +68,34 @@ class Agent:
             content = m.get("content") or ""
             if m.get("role") == "tool" and len(content) > 300:
                 m["content"] = content[:300] + "\n[...old tool output truncated...]"
-        # 2) drop oldest non-system messages while over budget
+        # 2) drop oldest assistant/tool messages, keeping user messages;
+        #    a dropped assistant tool call takes its tool results with it —
+        #    an orphaned tool result confuses small models
+        i = 1
+        while (self._history_size() > budget and len(self.messages) > 6
+               and i < len(self.messages) - 4):
+            if self.messages[i].get("role") == "user":
+                i += 1
+                continue
+            del self.messages[i]
+            while (i < len(self.messages) - 1
+                   and self.messages[i].get("role") == "tool"):
+                del self.messages[i]
+        # 3) trim huge user messages (keep the head — that's where the ask
+        #    lives; pasted logs/tracebacks tail off)
+        for m in self.messages[1:-4]:
+            if self._history_size() <= budget:
+                break
+            content = m.get("content") or ""
+            if m.get("role") == "user" and len(content) > 2000:
+                m["content"] = content[:2000] + "\n[...input trimmed...]"
+        # 4) last resort: drop oldest turns regardless of role
         while self._history_size() > budget and len(self.messages) > 6:
             del self.messages[1]
-        # 3) last resort: truncate even recent tool outputs
+            while (len(self.messages) > 6
+                   and self.messages[1].get("role") == "tool"):
+                del self.messages[1]
+        # 5) and if even that failed: truncate recent tool outputs
         if self._history_size() > budget:
             for m in self.messages[1:]:
                 content = m.get("content") or ""
@@ -84,13 +112,15 @@ class Agent:
         self.messages.append({"role": "user", "content": task})
         final = ""
         for step in range(1, self.cfg.max_steps + 1):
+            if self.stop_event is not None and self.stop_event.is_set():
+                return "stopped by user (Ctrl+C)"
             self._compact()
             try:
                 reply = self.client.chat(
                     self.messages,
                     tools=self.schemas,
                     on_token=None if self.quiet else ui.stream_token,
-                    on_thinking=None,
+                    on_thinking=None if self.quiet else ui.stream_thinking,
                 )
             except OllamaError as e:
                 ui.error(f"\n[{self.name}] {e}")

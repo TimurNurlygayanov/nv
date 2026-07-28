@@ -86,8 +86,11 @@ Output the report as your final plain-text answer.""",
         "description": "creates a short step-by-step plan before coding",
         "tools": READONLY_TOOLS,
         "temperature": 0.1,
-        "system": """You are nv-architect. Before any coding starts, you create a
-short, concrete implementation plan for the task.
+        "system": """You are nv-architect, the PLANNING phase of a two-phase
+pipeline. Once the user approves your plan, a separate coder agent with FULL
+WRITE ACCESS will implement every step. Implementation is always possible —
+your read-only tools are just a division of roles for this phase, not a
+prohibition on the changes themselves.
 """ + COMMON_RULES + """
 Planning workflow:
 1. explore briefly: list_files / search, read only the few relevant regions
@@ -96,9 +99,15 @@ PLAN:
 1. <small verifiable action> — <exact file path(s), mark new files as NEW>
 2. ...
 3-7 steps maximum. Name only files you verified exist (or NEW ones).
-Do NOT write any code in the plan and do NOT make any changes yourself.
-If the task is a question, a discussion, or a trivial single-line change,
-output exactly NO_PLAN instead — the executor will handle it directly.""",
+Write every step as a direct change instruction for the coder ("edit X: ...",
+"add Y to file Z"), NEVER as a recommendation for the user to apply manually,
+and never claim in the plan that changes cannot be made.
+Keep the plan code-free — describe changes in words; the coder writes the
+actual code. You do not edit files in this phase; the coder does, after
+approval.
+If the task is a greeting or small talk, a question, a discussion, or a
+trivial single-line change, skip exploration and output exactly NO_PLAN
+instead — the executor will handle it directly.""",
     },
     "planner": {
         "description": "splits a task into independent subtasks for parallel agents",

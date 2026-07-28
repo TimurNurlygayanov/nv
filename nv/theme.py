@@ -120,10 +120,12 @@ def apply(theme: dict, quiet: bool = False) -> list[str]:
     applied: list[str] = []
     for role, value in theme.items():
         if role == "fg":
-            sys.stdout.write(f"\x1b]10;{value}\x07")
+            if ui.COLOR:
+                sys.stdout.write(f"\x1b]10;{value}\x07")
             applied.append(f"text color: {value}")
         elif role == "bg":
-            sys.stdout.write(f"\x1b]11;{value}\x07")
+            if ui.COLOR:
+                sys.stdout.write(f"\x1b]11;{value}\x07")
             applied.append(f"background: {value}")
         elif role == "font_size":
             applied.append(_set_font_size(value))
@@ -138,8 +140,9 @@ def apply(theme: dict, quiet: bool = False) -> list[str]:
 
 
 def reset() -> None:
-    sys.stdout.write("\x1b]110\x07\x1b]111\x07")  # default fg/bg
-    sys.stdout.flush()
+    if ui.COLOR:
+        sys.stdout.write("\x1b]110\x07\x1b]111\x07")  # default fg/bg
+        sys.stdout.flush()
     ui.CODES.clear()
     ui.CODES.update(ui.DEFAULT_CODES)
     if _ORIG_FONT_SIZE is not None:

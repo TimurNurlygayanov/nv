@@ -30,6 +30,8 @@ DEFAULTS = {
     "personality": "",           # answer style for chat agents, e.g. "flirty"
     "max_answer_tokens": 2048,   # hard cap on model output per reply (num_predict)
     "max_diff_lines": 60,        # bigger changes always need explicit approval
+    "self_check": True,          # verify plan/result against the prompt before showing
+    "self_check_retries": 2,     # max automatic fix attempts after a failed check
 }
 
 
@@ -53,6 +55,8 @@ class Config:
     personality: str = DEFAULTS["personality"]
     max_answer_tokens: int = DEFAULTS["max_answer_tokens"]
     max_diff_lines: int = DEFAULTS["max_diff_lines"]
+    self_check: bool = DEFAULTS["self_check"]
+    self_check_retries: int = DEFAULTS["self_check_retries"]
     root: Path = field(default_factory=Path.cwd)
 
     @property

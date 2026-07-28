@@ -49,20 +49,43 @@ def run_team(cfg: Config, task: str, workers: int, agents_md: str) -> None:
 
     # 2) execute in parallel (quiet workers; confirmations still serialized)
     results: dict[str, str] = {}
+    stop = threading.Event()
 
     def work(idx: int, sub: dict) -> None:
         name = f"worker-{idx}"
-        agent = Agent(cfg, "coder", name=name, agents_md=agents_md, quiet=True)
-        ui.out(f"\n[{name}] started: {sub.get('title', '')}", ui.CYAN)
-        results[name] = agent.run(sub["task"])
-        ui.out(f"\n[{name}] finished: {results[name][:300]}", ui.CYAN)
+        try:
+            agent = Agent(cfg, "coder", name=name, agents_md=agents_md,
+                          quiet=True)
+            agent.stop_event = stop
+            ui.out(f"\n[{name}] started: {sub.get('title', '')}", ui.CYAN)
+            results[name] = agent.run(sub["task"])
+            ui.out(f"\n[{name}] finished: {results[name][:300]}", ui.CYAN)
+        except Exception as e:  # a dead worker must be visible, not silent
+            results[name] = f"ERROR: worker crashed: {e}"
+            ui.error(f"\n[{name}] crashed: {e}")
 
     threads = [threading.Thread(target=work, args=(i, st), daemon=True)
                for i, st in enumerate(subtasks, 1)]
     for t in threads:
         t.start()
-    for t in threads:
-        t.join()
+    try:
+        for t in threads:
+            while t.is_alive():
+                t.join(0.5)
+    except KeyboardInterrupt:
+        ui.warn("\nCtrl+C — asking workers to stop (they finish the "
+                "current model step, no new edits)...")
+        stop.set()
+        for t in threads:
+            t.join(15)
+        ui.warn("team run stopped; /diff shows what was already changed, "
+                "/undo reverts it")
+        return
+
+    failed = [n for n, r in results.items() if r.startswith("ERROR")]
+    if failed:
+        ui.warn(f"{len(failed)} of {len(threads)} worker(s) failed: "
+                f"{', '.join(sorted(failed))} — their subtasks are NOT done")
 
     # 3) review by a separate agent
     ui.banner("reviewer: checking the combined git diff")

@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import difflib
 import fnmatch
+import os
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 
 from nv.config import Config, save_global
@@ -35,6 +37,38 @@ def _changed_lines(old: str, new: str) -> int:
         if ln.startswith(("+", "-")) and not ln.startswith(("+++", "---")))
 
 
+def _read_raw(p: Path) -> str:
+    """Read without newline translation, so CRLF files stay detectable."""
+    with open(p, encoding="utf-8", errors="replace", newline="") as f:
+        return f.read()
+
+
+def _detect_eol(raw: str) -> str:
+    crlf = raw.count("\r\n")
+    lf = raw.count("\n") - crlf
+    return "\r\n" if crlf > lf else "\n"
+
+
+def _write_atomic(p: Path, content: str, eol: str) -> None:
+    """Write via temp file + os.replace (a crash never truncates the target),
+    re-applying the file's original line-ending style."""
+    data = content.replace("\r\n", "\n")
+    if eol == "\r\n":
+        data = data.replace("\n", "\r\n")
+    fd, tmp = tempfile.mkstemp(dir=str(p.parent), prefix=p.name + ".",
+                               suffix=".nv-tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            f.write(data)
+        os.replace(tmp, p)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 class Toolbox:
     def __init__(self, cfg: Config, agent_name: str = "agent") -> None:
         self.cfg = cfg
@@ -43,17 +77,25 @@ class Toolbox:
 
     # ---- read-only tools (no confirmation) ---------------------------
 
+    def _walk(self, base: Path):
+        """Files under base, pruning skipped dirs BEFORE descending (rglob
+        would materialize .git/node_modules first and stall on big repos)."""
+        if base.is_file():
+            yield base
+            return
+        for dirpath, dirnames, filenames in os.walk(base):
+            dirnames[:] = sorted(d for d in dirnames if not _skip(d))
+            for fn in sorted(filenames):
+                if not _skip(fn):
+                    yield Path(dirpath) / fn
+
     def list_files(self, path: str = ".", max_entries: int = 200) -> str:
         base = self.sandbox.resolve(path)
         if base.is_file():
             return str(base.relative_to(self.cfg.root))
         entries: list[str] = []
-        for p in sorted(base.rglob("*")):
-            rel = p.relative_to(self.cfg.root)
-            if any(_skip(part) for part in rel.parts):
-                continue
-            if p.is_file():
-                entries.append(str(rel).replace("\\", "/"))
+        for p in self._walk(base):
+            entries.append(str(p.relative_to(self.cfg.root)).replace("\\", "/"))
             if len(entries) >= max_entries:
                 entries.append(f"[... more than {max_entries} files, "
                                "use list_files on a subfolder or search]")
@@ -84,14 +126,14 @@ class Toolbox:
         except re.error as e:
             return f"ERROR: bad regex: {e}"
         hits: list[str] = []
-        files = [base] if base.is_file() else sorted(base.rglob("*"))
-        for p in files:
+        for p in self._walk(base):
             rel = p.relative_to(self.cfg.root)
-            if any(_skip(part) for part in rel.parts) or not p.is_file():
-                continue
-            if p.suffix.lower() not in TEXT_EXT_HINT and p.stat().st_size > 512_000:
-                continue
             try:
+                size = p.stat().st_size
+                if size > 2_000_000:
+                    continue  # no text worth line-searching is this big
+                if p.suffix.lower() not in TEXT_EXT_HINT and size > 512_000:
+                    continue
                 for i, line in enumerate(
                         p.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
                     if pattern.search(line):
@@ -104,16 +146,25 @@ class Toolbox:
         return "\n".join(hits) or f"no matches for '{query}'"
 
     def git_diff(self, stat_only: bool = False) -> str:
-        # track new files so they show up in the diff
-        subprocess.run(["git", "add", "-A", "-N"], cwd=self.cfg.root,
-                       capture_output=True, timeout=30)
-        args = ["git", "diff"]
-        if stat_only:
-            args.append("--stat")
-        result = subprocess.run(args, cwd=self.cfg.root, capture_output=True,
-                                text=True, encoding="utf-8", errors="replace",
-                                timeout=30)
-        return result.stdout.strip() or "(no changes)"
+        def _git(*args):
+            return subprocess.run(["git", *args], cwd=self.cfg.root,
+                                  capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace",
+                                  timeout=30)
+        if _git("rev-parse", "--git-dir").returncode != 0:
+            return "(not a git repository — no diff available)"
+        args = ["diff"] + (["--stat"] if stat_only else [])
+        result = _git(*args)
+        if result.returncode != 0:
+            return f"ERROR: git diff failed: {result.stderr.strip()[:300]}"
+        out = result.stdout.strip()
+        # list untracked files WITHOUT touching the user's index
+        untracked = _git("ls-files", "--others", "--exclude-standard")
+        names = [n for n in untracked.stdout.splitlines() if n.strip()][:50]
+        if names:
+            out += ("\n\n" if out else "") + "untracked new files:\n" + \
+                   "\n".join("  " + n for n in names)
+        return out or "(no changes)"
 
     # ---- mutating tools (confirmation required) ----------------------
 
@@ -122,10 +173,12 @@ class Toolbox:
             p = self.sandbox.resolve(path, for_write=True)
         except SandboxError as e:
             return f"ERROR: {e}"
-        old = ""
+        old, raw, eol = "", None, "\n"
         if p.is_file():
-            old = p.read_text(encoding="utf-8", errors="replace")
-            if old == content:
+            raw = _read_raw(p)
+            eol = _detect_eol(raw)
+            old = raw.replace("\r\n", "\n")
+            if old == content.replace("\r\n", "\n"):
                 return f"no changes: {path} already has this exact content"
         ui.banner(f"{self.agent_name} wants to write {path}")
         ui.render_diff(old, content, path)
@@ -144,7 +197,10 @@ class Toolbox:
                     if big else " Do not retry the same change.")
             return f"REJECTED by user.{(' User says: ' + feedback) if feedback else hint}"
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content, encoding="utf-8")
+        if raw is not None and p.is_file() and _read_raw(p) != raw:
+            return (f"ERROR: {path} changed on disk while waiting for "
+                    "approval — re-read the file and retry")
+        _write_atomic(p, content, eol)
         return f"written: {path} ({len(content.splitlines())} lines)"
 
     def edit_file(self, path: str, old_text: str, new_text: str) -> str:
@@ -154,7 +210,11 @@ class Toolbox:
             return f"ERROR: {e}"
         if not p.is_file():
             return f"ERROR: file not found: {path}"
-        text = p.read_text(encoding="utf-8", errors="replace")
+        raw = _read_raw(p)
+        eol = _detect_eol(raw)
+        text = raw.replace("\r\n", "\n")
+        old_text = old_text.replace("\r\n", "\n")
+        new_text = new_text.replace("\r\n", "\n")
         count = text.count(old_text)
         if count == 0:
             return ("ERROR: old_text not found in file. Re-read the file with "
@@ -179,7 +239,10 @@ class Toolbox:
                     "that solves the task, or split it into steps."
                     if big else " Do not retry the same change.")
             return f"REJECTED by user.{(' User says: ' + feedback) if feedback else hint}"
-        p.write_text(new_content, encoding="utf-8")
+        if _read_raw(p) != raw:
+            return (f"ERROR: {path} changed on disk while waiting for "
+                    "approval — re-read the file and retry")
+        _write_atomic(p, new_content, eol)
         return f"edited: {path}"
 
     def run_command(self, command: str) -> str:
@@ -268,8 +331,8 @@ class Toolbox:
         return result + " (saved; /theme reset and /style off restore defaults)"
 
     def save_note(self, text: str) -> str:
-        """Append a durable fact to .nv/notes.md (announced, not confirmed —
-        it never touches project code)."""
+        """Append a durable fact to the project notes (announced, not
+        confirmed — stored outside the repo, never touches project code)."""
         text = text.strip()
         if not text:
             return "ERROR: empty note"

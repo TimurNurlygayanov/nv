@@ -93,8 +93,8 @@ One-shot mode: `nv "add a --verbose flag to cli.py"` or `nv --team 3 "task"`.
 | `/paste [question]` | paste a multi-line stack trace or log fragment (finish with `END`) and discuss it |
 | `/load <file-or-folder> [question]` | feed files to the agent: inventory → relevant-file selection (confirmed by you) → chunked map-reduce extraction, with an upfront time estimate |
 | `/undo` | revert the working tree to the checkpoint taken before the last task |
-| `/resume` | continue yesterday's conversation (history persists in `.nv/session.json`) |
-| `/note <fact>` | append a fact to project notes (`.nv/notes.md`); agents also save facts themselves and get all notes injected at start |
+| `/resume` | continue yesterday's conversation (history persists between runs) |
+| `/note <fact>` | append a fact to project notes; agents also save facts themselves and get all notes injected at start |
 | `/diff` / `/diff stat` | show git diff right in the chat |
 | `/plan on|off`, `/plan <task>` | control the planning step |
 | `/team N <task>` | planner splits the task, N agents work in parallel, a separate reviewer agent reviews the diff and can trigger a fixer |
@@ -193,7 +193,7 @@ run it? [y/n or type a correction]
 - **Fearless changes** — a git checkpoint is taken before every task;
   `/undo` reverts everything the agents did, `/diff` shows it first.
 - **Knowledge accumulates** — facts saved via `/note` (or by agents through
-  their `save_note` tool) land in `.nv/notes.md` and are injected into every
+  their `save_note` tool) land in the project notes and are injected into every
   agent's system prompt, so the model "remembers" your system across sessions.
 - **Long investigations** — chat history is saved automatically; next day
   `/resume` continues where you stopped. Ctrl+C aborts a running task

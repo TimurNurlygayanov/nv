@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
-from nv import (__version__, checkpoint, discover, ingest, session, terminal,
-                theme, ui)
+from nv import (__version__, checkpoint, discover, ingest, selfcheck, session,
+                terminal, theme, ui)
 from nv.agent import Agent
 from nv.config import Config, load_agents_md, load_config, save_global
 from nv.ollama import OllamaClient, OllamaError
@@ -76,7 +77,7 @@ def _pick(prompt: str, options: list[str], default: int = 0) -> str:
         ui.out(f"  {i}. {opt}{marker}")
     try:
         answer = input("  choose number: ").strip()
-    except EOFError:
+    except (EOFError, KeyboardInterrupt):
         answer = ""
     if answer.isdigit() and 1 <= int(answer) <= len(options):
         return options[int(answer) - 1]
@@ -134,9 +135,10 @@ def _check_connection(cfg: Config, offer_scan: bool = True) -> None:
     if not offer_scan:
         return
     try:
-        answer = input(f"{ui.BOLD}look for Ollama on OLLAMA_HOST / localhost? "
-                       f"[Y/n] {ui.RESET}").strip().lower()
-    except EOFError:
+        answer = input(ui.prompt_str(
+            f"{ui.BOLD}look for Ollama on OLLAMA_HOST / localhost? "
+            f"[Y/n] {ui.RESET}")).strip().lower()
+    except (EOFError, KeyboardInterrupt):
         return
     if answer in ("", "y", "yes", "д", "да"):
         run_discovery(cfg)
@@ -148,7 +150,20 @@ def run_planned(cfg: Config, executor: Agent, task: str, agents_md: str) -> str:
     ui.banner("planning")
     planner = Agent(cfg, "architect", name="architect", agents_md=agents_md)
     plan = planner.run(task)
-    if "NO_PLAN" in plan[:200]:
+    for _ in range(max(0, cfg.self_check_retries)):
+        if "NO_PLAN" in plan[:200] or "PLAN:" not in plan:
+            break
+        reason = selfcheck.check(cfg, task, plan, "plan")
+        if not reason:
+            break
+        ui.warn(f"self-review: {reason} — replanning")
+        plan = planner.run(
+            "REVIEW REJECTED your plan: " + reason + ". Re-read the ORIGINAL "
+            "TASK below and output a corrected full PLAN (or NO_PLAN).\n"
+            "ORIGINAL TASK: " + task)
+    if "NO_PLAN" in plan[:200] or "PLAN:" not in plan:
+        # either an explicit NO_PLAN or the model answered in prose
+        # (greeting, question, ...) — never offer that for approval
         ui.info("no plan needed — executing directly")
         return executor.run(task)
     for _ in range(5):
@@ -158,18 +173,26 @@ def run_planned(cfg: Config, executor: Agent, task: str, agents_md: str) -> str:
                 "Execute this task following the approved plan below, step by "
                 "step and in order. Say which step number you are on. Do not "
                 "add work beyond the plan. If a step turns out to be wrong or "
-                "impossible, stop and explain instead of improvising.\n\n"
+                "impossible, stop and explain instead of improvising. You have "
+                "full write access: make every change yourself with your "
+                "tools. The plan was written by a read-only planning agent — "
+                "if it says changes cannot be made or must be applied "
+                "manually by the user, ignore that and implement them.\n\n"
                 f"TASK: {task}\n\n{plan}")
         if not feedback:
             ui.warn("plan cancelled")
             return ""
         ui.banner("revising plan")
-        plan = planner.run(
+        revised = planner.run(
             "Revise the plan based on this user feedback (output the full "
             "updated PLAN again, or NO_PLAN if nothing is needed): " + feedback)
-        if "NO_PLAN" in plan[:200]:
+        if "NO_PLAN" in revised[:200]:
             ui.warn("plan cancelled")
             return ""
+        if "PLAN:" in revised:
+            plan = revised
+        else:
+            ui.info("(answer only — the previous plan is unchanged)")
     ui.warn("too many plan revisions — cancelled")
     return ""
 
@@ -181,7 +204,7 @@ def _read_multiline() -> str:
     while True:
         try:
             row = input()
-        except EOFError:
+        except (EOFError, KeyboardInterrupt):
             break
         if row.strip() == "END":
             break
@@ -203,21 +226,44 @@ def run_minimizer(cfg: Config, agents_md: str, task: str = "") -> None:
         ui.warn("\nminimizer interrupted")
 
 
+# greetings / acknowledgements: no checkpoint, no planning — just chat
+_SMALLTALK = re.compile(
+    r"^(hi|hello|hey|yo|good\s+(morning|afternoon|evening)|thanks|thank\s+you|"
+    r"ok|okay|привет|здравствуй(те)?|добр(ый|ое)\s+(утро|день|вечер)|спасибо|ок)"
+    r"[\s!.?)]*$", re.IGNORECASE)
+
+
 def _run_task(cfg: Config, agent: Agent, task: str, agents_md: str,
               planned: bool = True) -> None:
     """One chat turn: checkpoint -> (plan ->) run -> minimize-offer ->
     persist history. Ctrl+C aborts the turn, not the REPL."""
     ui.CONFIRM.reset()
+    chat = bool(_SMALLTALK.match(task.strip()))
     cp = None
-    if agent.kind in ("coder", "writer"):
+    if not chat and agent.kind in ("coder", "writer"):
         cp = checkpoint.create(cfg.root)
         if cp:
             ui.info("checkpoint saved (/undo reverts this task)")
     try:
-        if planned and cfg.plan_first and agent.kind == "coder":
-            run_planned(cfg, agent, task, agents_md)
+        if planned and not chat and cfg.plan_first and agent.kind == "coder":
+            result = run_planned(cfg, agent, task, agents_md)
         else:
-            agent.run(task)
+            result = agent.run(task)
+        # self-review: does the final answer actually serve the original
+        # prompt? Skip for chat, cancelled plans and transport errors.
+        if result and not chat and not result.startswith(("ERROR:", "stopped:")):
+            for _ in range(max(0, cfg.self_check_retries)):
+                reason = selfcheck.check(
+                    cfg, task, result, "result",
+                    diff_stat=agent.toolbox.git_diff(stat_only=True))
+                if not reason:
+                    break
+                ui.warn(f"self-review: {reason} — asking the agent to fix it")
+                result = agent.run(
+                    "SELF-REVIEW rejected your previous answer: " + reason +
+                    ". Re-read the ORIGINAL TASK below, check the actual state "
+                    "of the files, and produce a correct result.\n"
+                    "ORIGINAL TASK: " + task)
         if cp:
             grown = checkpoint.changed_lines_since(cfg.root, cp)
             if grown > cfg.max_diff_lines:
@@ -253,11 +299,25 @@ def _handle_load(cfg: Config, agent: Agent, path_str: str, question: str,
               agents_md, planned=False)
 
 
+def _split_path_arg(rest: str) -> tuple[str, str]:
+    """Split '<path> [question]' honoring quotes around paths with spaces."""
+    rest = rest.strip()
+    if rest[:1] in ("'", '"'):
+        end = rest.find(rest[0], 1)
+        if end > 0:
+            return rest[1:end], rest[end + 1:].strip()
+    parts = rest.split(maxsplit=1)
+    return parts[0], parts[1] if len(parts) > 1 else ""
+
+
 def _input_task(text: str, source: str, question: str, summarized: bool) -> str:
     q = question or ("Analyze this input: explain the key errors/failures "
                      "and their most likely causes.")
     label = "summarized digest" if summarized else "content"
-    return f"{q}\n\nINPUT {label} from {source}:\n```\n{text}\n```"
+    # fence longer than any backtick run inside, so content can't escape it
+    run = max((len(m) for m in re.findall(r"`+", text)), default=0)
+    fence = "`" * max(3, run + 1)
+    return f"{q}\n\nINPUT {label} from {source}:\n{fence}\n{text}\n{fence}"
 
 
 def repl(cfg: Config) -> None:
@@ -281,14 +341,16 @@ def repl(cfg: Config) -> None:
     agent = Agent(cfg, "coder", agents_md=agents_md)
     ask_agent: Agent | None = None
     term_buf = terminal.TerminalBuffer()
+    ui.init_history(session.state_dir(cfg.root) / "input-history")
 
     def run_shell(cmd: str) -> None:
         rc, out = terminal.run(cfg, cmd, term_buf)
         if rc in (0, 130):
             return
         try:
-            answer = input(f"{ui.BOLD}fix this command with the model? "
-                           f"[y/N] {ui.RESET}").strip().lower()
+            answer = input(ui.prompt_str(
+                f"{ui.BOLD}fix this command with the model? "
+                f"[y/N] {ui.RESET}")).strip().lower()
         except (EOFError, KeyboardInterrupt):
             return
         if answer in ("y", "yes", "д", "да"):
@@ -300,7 +362,11 @@ def repl(cfg: Config) -> None:
 
     while True:
         try:
-            line = input(f"{ui.c('prompt')}nv>{ui.RESET} ").strip()
+            ui.flush_stdin()
+            loc = terminal.cwd_label(cfg, term_buf)
+            line = input(ui.prompt_str(
+                f"{ui.c('prompt')}nv{' ' + loc if loc else ''}>"
+                f"{ui.RESET} ")).strip()
         except EOFError:
             ui.out("\nbye")
             return
@@ -364,10 +430,11 @@ def repl(cfg: Config) -> None:
                           agents_md, planned=False)
             elif cmd == "/load":
                 if len(parts) < 2:
-                    ui.warn("usage: /load <file-or-folder> [question]")
+                    ui.warn("usage: /load <file-or-folder> [question] "
+                            "(quote paths with spaces)")
                     continue
-                _handle_load(cfg, agent, parts[1],
-                             parts[2] if len(parts) > 2 else "", agents_md)
+                lpath, lquestion = _split_path_arg(line.split(maxsplit=1)[1])
+                _handle_load(cfg, agent, lpath, lquestion, agents_md)
             elif cmd == "/minimize":
                 ui.CONFIRM.reset()
                 run_minimizer(cfg, agents_md)
@@ -406,7 +473,11 @@ def repl(cfg: Config) -> None:
                     cfg.theme = {}
                     save_global(cfg)
                 else:
-                    patch = theme.from_prompt(cfg, arg)
+                    try:
+                        patch = theme.from_prompt(cfg, arg)
+                    except KeyboardInterrupt:
+                        ui.warn("\ninterrupted")
+                        continue
                     if patch:
                         theme.apply(patch)
                         cfg.theme.update(patch)
@@ -426,8 +497,8 @@ def repl(cfg: Config) -> None:
             elif cmd == "/note":
                 if len(parts) > 1:
                     session.add_note(cfg.root, line.split(maxsplit=1)[1])
-                    ui.info("note saved to .nv/notes.md (injected into agents "
-                            "from their next start)")
+                    ui.info("note saved to project notes (injected into "
+                            "agents from their next start)")
                 else:
                     notes = session.load_notes(cfg.root)
                     ui.out(notes or "(no notes yet — /note <fact> to add one)")
@@ -483,8 +554,11 @@ def repl(cfg: Config) -> None:
                 agent = Agent(cfg, name, agents_md=agents_md)
                 ui.info(f"switched to agent '{name}' (history reset)")
             elif cmd == "/scan":
-                if run_discovery(cfg):
-                    agent = Agent(cfg, agent.kind, agents_md=agents_md)
+                try:
+                    if run_discovery(cfg):
+                        agent = Agent(cfg, agent.kind, agents_md=agents_md)
+                except KeyboardInterrupt:
+                    ui.warn("\nscan interrupted")
             elif cmd == "/model":
                 if len(parts) < 2:
                     ui.warn("usage: /model qwen3-coder:30b")
@@ -517,13 +591,9 @@ def repl(cfg: Config) -> None:
 
 
 def main() -> None:
-    if sys.platform == "win32":
-        try:
-            sys.stdout.reconfigure(encoding="utf-8")
-            sys.stderr.reconfigure(encoding="utf-8")
-        except AttributeError:
-            pass
-
+    # stream encoding is configured in nv.ui at import time (utf-8 with
+    # errors="replace") — do not reconfigure here, it would reset the
+    # error handler to strict and crash on stray surrogates mid-stream
     parser = argparse.ArgumentParser(
         prog="nv", description="local LLM agent console (Ollama)")
     parser.add_argument("prompt", nargs="*", help="one-shot task (omit for REPL)")
@@ -540,12 +610,11 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = load_config(Path.cwd())
+    # CLI flags are per-run overrides; only /host and /model persist
     if args.host:
         cfg.host = args.host.rstrip("/")
-        save_global(cfg)
     if args.model:
         cfg.model = args.model
-        save_global(cfg)
     if args.ctx:
         cfg.num_ctx = args.ctx
 
@@ -557,13 +626,16 @@ def main() -> None:
         task = " ".join(args.prompt)
         agents_md = load_agents_md(cfg.root)
         if args.team:
-            run_team(cfg, task, args.team, agents_md)
+            try:
+                run_team(cfg, task, args.team, agents_md)
+            except KeyboardInterrupt:
+                ui.warn("\ninterrupted")
         else:
+            # same pipeline as the REPL: checkpoint, plan, self-review,
+            # history — so /undo and /resume work for one-shot runs too
             executor = Agent(cfg, "coder", agents_md=agents_md)
-            if cfg.plan_first and not args.no_plan:
-                run_planned(cfg, executor, task, agents_md)
-            else:
-                executor.run(task)
+            _run_task(cfg, executor, task, agents_md,
+                      planned=not args.no_plan)
         return
 
     repl(cfg)

@@ -13,12 +13,16 @@ import urllib.request
 OLLAMA_PORT = 11434
 PROBE_TIMEOUT = 3
 
+# local/LAN probes must bypass any corporate HTTP(S)_PROXY, or every
+# candidate "fails" and discovery reports no server found
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
 
 def probe(host_url: str) -> list[str] | None:
     """Returns model names if host_url is a live Ollama server, else None."""
     try:
-        with urllib.request.urlopen(host_url.rstrip("/") + "/api/tags",
-                                    timeout=PROBE_TIMEOUT) as resp:
+        with _OPENER.open(host_url.rstrip("/") + "/api/tags",
+                          timeout=PROBE_TIMEOUT) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         return [m.get("name", "") for m in data.get("models", [])]
     except (OSError, ValueError):
@@ -31,7 +35,11 @@ def _normalize(url: str) -> str:
         return ""
     if not url.startswith("http"):
         url = f"http://{url}"
+    if "//" not in url:  # malformed like "http:11434" — not a usable candidate
+        return ""
     host_part = url.split("//", 1)[1]
+    if not host_part:
+        return ""
     if ":" not in host_part:
         url += f":{OLLAMA_PORT}"
     return url

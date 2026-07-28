@@ -7,8 +7,29 @@ from __future__ import annotations
 
 import difflib
 import os
+import re
 import sys
 import threading
+
+# Line editing in input(): without readline, arrow keys on unix terminals
+# print escape codes (^[[D) instead of moving the cursor. Also enables
+# up-arrow history. Windows consoles do this natively; readline is absent
+# there and the import just fails quietly.
+try:
+    import readline  # noqa: F401
+    _HAS_READLINE = True
+except ImportError:
+    _HAS_READLINE = False
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def prompt_str(text: str) -> str:
+    """Prepare a colored prompt for input(): readline must be told the ANSI
+    codes are zero-width (\\x01..\\x02), or cursor movement miscounts."""
+    if not _HAS_READLINE:
+        return text
+    return _ANSI.sub(lambda m: "\x01" + m.group(0) + "\x02", text)
 
 # Enable ANSI escape codes on Windows terminals.
 if os.name == "nt":
@@ -23,15 +44,18 @@ for _stream in (sys.stdout, sys.stderr):
         except (OSError, ValueError):
             pass
 
-RESET = "\x1b[0m"
-BOLD = "\x1b[1m"
-DIM = "\x1b[2m"
-RED = "\x1b[31m"
-GREEN = "\x1b[32m"
-YELLOW = "\x1b[33m"
-BLUE = "\x1b[34m"
-MAGENTA = "\x1b[35m"
-CYAN = "\x1b[36m"
+# no escape codes when piped/redirected or when the user sets NO_COLOR
+COLOR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+
+RESET = "\x1b[0m" if COLOR else ""
+BOLD = "\x1b[1m" if COLOR else ""
+DIM = "\x1b[2m" if COLOR else ""
+RED = "\x1b[31m" if COLOR else ""
+GREEN = "\x1b[32m" if COLOR else ""
+YELLOW = "\x1b[33m" if COLOR else ""
+BLUE = "\x1b[34m" if COLOR else ""
+MAGENTA = "\x1b[35m" if COLOR else ""
+CYAN = "\x1b[36m" if COLOR else ""
 
 _io_lock = threading.RLock()
 
@@ -50,7 +74,7 @@ CODES = dict(DEFAULT_CODES)
 
 
 def c(role: str) -> str:
-    return CODES.get(role, "")
+    return CODES.get(role, "") if COLOR else ""
 
 
 def out(text: str = "", color: str = "", end: str = "\n") -> None:
@@ -62,6 +86,32 @@ def out(text: str = "", color: str = "", end: str = "\n") -> None:
 def stream_token(token: str) -> None:
     sys.stdout.write(token)
     sys.stdout.flush()
+
+
+def stream_thinking(token: str) -> None:
+    """Stream the model's thinking dimmed, so long thinks show progress
+    instead of a silent console."""
+    sys.stdout.write(f"{DIM}{token}{RESET}" if COLOR else token)
+    sys.stdout.flush()
+
+
+def init_history(path) -> None:
+    """Persist input history across sessions (no-op without readline)."""
+    if not _HAS_READLINE:
+        return
+    import atexit
+    try:
+        readline.read_history_file(str(path))
+    except OSError:
+        pass
+    readline.set_history_length(500)
+
+    def _save() -> None:
+        try:
+            readline.write_history_file(str(path))
+        except OSError:
+            pass
+    atexit.register(_save)
 
 
 def banner(text: str) -> None:
@@ -112,6 +162,21 @@ def colorize_git_diff(diff_text: str) -> None:
                 out(line)
 
 
+def flush_stdin() -> None:
+    """Discard keystrokes typed while the model was busy (streaming/thinking)
+    so they do not accidentally answer the next prompt."""
+    try:
+        if os.name == "nt":
+            import msvcrt
+            while msvcrt.kbhit():
+                msvcrt.getwch()
+        elif sys.stdin.isatty():
+            import termios
+            termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+    except (ImportError, OSError, ValueError):
+        pass
+
+
 class Confirmer:
     """Serialized y/n confirmations. 'a' approves everything for the rest
     of the current task (resettable)."""
@@ -132,20 +197,24 @@ class Confirmer:
                 return True, ""
             tag = f"[{agent_name}] " if agent_name else ""
             with _io_lock:
+                flush_stdin()
                 out(f"\n{BOLD}{YELLOW}{tag}{prompt}{RESET}")
                 out(f"{DIM}  y = yes | n = no | a = yes to all (this task) | "
                     f"or type feedback for the agent{RESET}")
-                try:
-                    answer = input(f"{BOLD}  approve? {RESET}").strip()
-                except EOFError:
-                    return False, "user aborted"
+                while True:
+                    try:
+                        answer = input(prompt_str(f"{BOLD}  approve? {RESET}")).strip()
+                    except (EOFError, KeyboardInterrupt):
+                        return False, "user aborted"
+                    if answer:  # bare Enter is ambiguous — ask again
+                        break
             low = answer.lower()
             if low in ("y", "yes", "д", "да"):
                 return True, ""
             if low == "a":
                 self.approve_all = True
                 return True, ""
-            if low in ("n", "no", "н", "нет", ""):
+            if low in ("n", "no", "н", "нет"):
                 return False, ""
             return False, answer  # anything else = rejection with feedback
 
